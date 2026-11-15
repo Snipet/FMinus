@@ -1,6 +1,6 @@
 // src/opt/EarlyReturn.h: what the passes that make a call of the program return early share, the loop budget's
 // (opt/LoopBudget.h) and the bounds checks' (opt/BoundsCheck.h): which of the program's functions a call runs, what a
-// function that may now return early no longer promises, and what it returns then.
+// function that may now return early no longer promises, and what it returns then, deadline scopes abandoned first.
 #pragma once
 
 #include <llvm/ADT/SmallVector.h>
@@ -33,6 +33,19 @@ namespace fminus::opt
     // The same of a call of such a function, wherever it is: the attributes the call carries itself.
     void mayReturnEarly(llvm::CallBase& call);
 
-    // Returns, at `at`, what `function` returns when it stops: nothing, zero or null.
-    void returnEarly(llvm::IRBuilderBase& at, const llvm::Function& function);
+    // A within block's deadline scope (ir/Within.cpp) is its thread's, which the web library finds by the thread's id
+    // (web/Web.h): one begun and never ended would stay the thread's, bounding its later waits by a deadline long past
+    // and holding its later requests, and a later thread given the same id would find it. A stopped call reaches no
+    // block's end, so every way out a pass makes in a function that begins one (a call of kWithinBeginSymbol) first
+    // abandons the thread's scopes under the program's context (kWithinAbandonSymbol, which neither waits nor locks).
+    // That is enough: a scope's function either stops itself or returns after the call that stopped, through one of
+    // those ways out, on the scope's own thread; and every function between it and the host returns too, so every
+    // scope its thread has open is dead. A module without such a call is left as it was.
+    inline constexpr const char* kWithinBeginSymbol = "fminus_web_http_within_begin";
+    inline constexpr const char* kWithinAbandonSymbol = "fminus_web_http_within_abandon";
+    inline constexpr const char* kWebContextGlobal = "fminus_web_context";   // ir::kWebContextSymbol
+
+    // Returns, at `at`, what `function` returns when it stops: nothing, zero or null; in a function that begins a
+    // deadline scope, after abandoning the thread's scopes (above).
+    void returnEarly(llvm::IRBuilderBase& at, llvm::Function& function);
 } // namespace fminus::opt

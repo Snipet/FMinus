@@ -1,0 +1,129 @@
+// The type string, {ptr, i32}: a parameter and a result as that pair, in memory its two members each loaded with its
+// own tag (a pointer's and an int's), == a call of the runtime's comparison, a switch on a string a chain of them,
+// string_size of a literal a constant, string_slice inline. A char array's element a byte, tagged as a char of its own,
+// widened to an int from 0 to 255, and a store of its low 8 bits. --run passes no string. Then the errors, each once.
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - -O0 | FileCheck %s
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - | FileCheck %s --check-prefix=OPT
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | not fminus - --run pick 0 2>&1 | FileCheck %s --check-prefix=RUNS
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - --run sized | FileCheck %s --check-prefix=SIZED
+// RUN: sed -n '/^\/\/ ERRORS$/,$p' %s | not fminus - 2>&1 | FileCheck %s --check-prefix=ERR --implicit-check-not=error:
+
+module Label
+{
+    string text;
+    char bytes[8];
+};
+
+int same(Label* l, string s)
+{
+    return l->text == s;
+}
+
+// CHECK:       %Label = type { { ptr, i32 }, [8 x i8] }
+// CHECK-LABEL: define i32 @same(ptr %l, { ptr, i32 } %s)
+// CHECK:         store { ptr, i32 } %s, ptr %s.addr, align 8
+// CHECK:         [[TEXT:%.*]] = getelementptr inbounds nuw %Label, ptr {{%.*}}, i32 0, i32 0
+// CHECK-NEXT:    [[DATAAT:%.*]] = getelementptr inbounds nuw { ptr, i32 }, ptr [[TEXT]], i32 0, i32 0
+// CHECK-NEXT:    [[DATA:%.*]] = load ptr, ptr [[DATAAT]], align 8, !tbaa [[POINTER:![0-9]+]]
+// CHECK-NEXT:    [[SIZEAT:%.*]] = getelementptr inbounds nuw { ptr, i32 }, ptr [[TEXT]], i32 0, i32 1
+// CHECK-NEXT:    [[SIZE:%.*]] = load i32, ptr [[SIZEAT]], align 4, !tbaa [[INT:![0-9]+]]
+// CHECK:         %equal = call i32 @fminus_rt_string_equal(ptr {{%.*}}, i32 {{%.*}}, ptr {{%.*}}, i32 {{%.*}})
+// CHECK-NEXT:    %streq = icmp ne i32 %equal, 0
+
+// OPT-LABEL: define {{.*}}i32 @same(ptr {{.*}}%l, { ptr, i32 } %s)
+// OPT:         %string.data = load ptr, ptr %l, align 8, !tbaa
+// OPT:         %string.size = load i32, ptr {{%.*}}, align 8, !tbaa
+// OPT:         tail call i32 @fminus_rt_string_equal(ptr %string.data, i32 %string.size, ptr %s.fca.0.extract, i32 %s.fca.1.extract)
+
+int first(Label* l)
+{
+    l->bytes[1] = 300;
+    return l->bytes[0];
+}
+
+// CHECK-LABEL: define i32 @first(ptr %l)
+// CHECK:         store i8 44, ptr %arrayidx, align 1, !tbaa [[CHAR:![0-9]+]]
+// CHECK:         [[BYTE:%.*]] = load i8, ptr %arrayidx{{[0-9]+}}, align 1, !tbaa [[CHAR]]
+// CHECK-NEXT:    %conv = zext i8 [[BYTE]] to i32
+// CHECK-NEXT:    ret i32 %conv
+
+// OPT-LABEL: define range(i32 0, 256) i32 @first(
+
+int size() { return string_size("four"); }
+
+// CHECK-LABEL: define i32 @size()
+// CHECK-NEXT:  entry:
+// CHECK-NEXT:    ret i32 4
+
+int pick(string s)
+{
+    switch (s)
+    {
+    case "saw":
+        return 1;
+    case "square":
+        return 2;
+    default:
+        return 0;
+    }
+}
+
+// CHECK-LABEL: define i32 @pick({ ptr, i32 } %s)
+// CHECK:         %equal = call i32 @fminus_rt_string_equal(ptr {{%.*}}, i32 {{%.*}}, ptr @.str.{{[0-9]+}}, i32 3)
+// CHECK-NEXT:    %streq = icmp ne i32 %equal, 0
+// CHECK-NEXT:    br i1 %streq, label %sw.bb, label %sw.next
+// CHECK:       sw.next:
+// CHECK:         call i32 @fminus_rt_string_equal(ptr {{%.*}}, i32 {{%.*}}, ptr @.str.{{[0-9]+}}, i32 6)
+// CHECK:         br i1 {{%.*}}, label %sw.bb{{[0-9]+}}, label %sw.next{{[0-9]+}}
+// CHECK:       sw.next{{[0-9]+}}:
+// CHECK-NEXT:    br label %sw.default
+
+// OPT-LABEL: define range(i32 0, 3) i32 @pick({ ptr, i32 } %s)
+// OPT:         tail call i32 @fminus_rt_string_equal(ptr %s.fca.0.extract, i32 %s.fca.1.extract, ptr nonnull @.str.{{[0-9]+}}, i32 3)
+// OPT:         tail call i32 @fminus_rt_string_equal(ptr %s.fca.0.extract, i32 %s.fca.1.extract, ptr nonnull @.str.{{[0-9]+}}, i32 6)
+
+string tail(string s) { return string_slice(s, 1, string_size(s)); }
+
+// CHECK-LABEL: define { ptr, i32 } @tail({ ptr, i32 } %s)
+// CHECK:         %from = call i32 @llvm.smax.i32(i32 0, i32
+// CHECK:         %to = call i32 @llvm.smax.i32(i32 %from, i32
+// CHECK:         %at = getelementptr i8, ptr %data, i64
+// CHECK:         %count = sub nsw i32 %to, %from
+// CHECK:         ret { ptr, i32 } %string_slice
+
+// OPT-LABEL: define { ptr, i32 } @tail({ ptr, i32 } %s)
+// OPT-NOT:     call {{.*}}@fminus_rt
+// OPT:         ret { ptr, i32 }
+
+int sized() { return string_size(tail("abc")) + pick(tail("xsaw")) * 10; }
+
+// CHECK: [[POINTER]] = !{[[ANY:![0-9]+]], [[ANY]], i64 0}
+// CHECK: [[ANY]] = !{!"any pointer", {{![0-9]+}}, i64 0}
+// CHECK: [[INT]] = !{[[INTTYPE:![0-9]+]], [[INTTYPE]], i64 0}
+// CHECK: [[INTTYPE]] = !{!"int", {{![0-9]+}}, i64 0}
+// CHECK: [[CHAR]] = !{[[CHARTYPE:![0-9]+]], [[CHARTYPE]], i64 0}
+// CHECK: [[CHARTYPE]] = !{!"char", {{![0-9]+}}, i64 0}
+
+// RUNS: fminus: --run: 'pick' takes a parameter of type 'string'; --run passes bools, ints, floats, doubles and arrays of ints, floats and doubles only
+// SIZED: 12
+
+// ERRORS
+int wrong(string s, int k)
+{
+    if (s)
+        k++;
+    k += s < "a";
+    char c;
+    switch (s) { case "a": case "a": break; }
+    return k + s;
+}
+string outside(string s);
+
+// ERR: <stdin>:4:9: error: statement requires expression of scalar type ('string' invalid)
+// ERR-NEXT: <stdin>:4:9: note: a string is no condition: test whether it is empty with string_size(s) > 0
+// ERR: <stdin>:6:12: error: invalid operands to binary expression ('string' and 'string')
+// ERR: <stdin>:7:10: error: FMinus has no 'char' variables, parameters or results: a char is an array's element or a pointer's pointee, and an element reads as an int from 0 to 255
+// ERR: <stdin>:8:33: error: duplicate case value '"a"'
+// ERR-NEXT: <stdin>:8:23: note: previous case defined here
+// ERR: <stdin>:9:14: error: invalid operands to binary expression ('int' and 'string')
+// ERR: <stdin>:11:8: error: an external function cannot take or return a 'string' yet: C passes a struct by each platform's own rules; define 'outside' in the program, or pass string_data(s) and string_size(s)

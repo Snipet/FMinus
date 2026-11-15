@@ -144,6 +144,18 @@ TEST_CASE("a format's errors are clang's for printf's, at the columns clang repo
     // Too many: at the first int left over.
     CHECK(errorsOf("int d(int n) { return __fminus_string_hash(\"%d\", n, n + 1); }\n")
           == "test.fm:1:53: error: data argument not used by format string\n");
+    // One left over has no place to be the wrong type for (clang checks an argument against its conversion): a float
+    // or a literal there is "not used", once; one with an error of its own has that error alone, as clang's call
+    // whose argument is ill formed has no format diagnostic.
+    CHECK(errorsOf("int d2(int n) { return __fminus_string_hash(\"%d\", n, 1.5f); }\n")
+          == "test.fm:1:54: error: data argument not used by format string\n");
+    CHECK(errorsOf("int d3(int n) { return __fminus_string_hash(\"%d\", n, \"x\"); }\n")
+          == "test.fm:1:54: error: data argument not used by format string\n");
+    CHECK(errorsOf("int d4(int n) { return __fminus_string_hash(\"%d\", n, nope); }\n")
+          == "test.fm:1:54: error: use of undeclared identifier 'nope'\n");
+    CHECK(errorsOf("int d5(float x) { return __fminus_string_hash(\"%d\", x, 2.5f); }\n")
+          == "test.fm:1:53: error: format specifies type 'int' but the argument has type 'float'\n"
+             "test.fm:1:56: error: data argument not used by format string\n");
     // An int, an enumeration's or a bool's, is what %d reads: anything else is clang's -Wformat, here an error.
     CHECK(errorsOf("int e(float x, int* p) { return __fminus_string_hash(\"%d %d\", x, p); }\n")
           == "test.fm:1:63: error: format specifies type 'int' but the argument has type 'float'\n"
@@ -191,9 +203,10 @@ TEST_CASE("a string literal anywhere but a builtin's string parameter is an erro
              "test.fm:10:24: error: assigning to 'float' from incompatible type 'char[2]'\n"
              "test.fm:11:20: error: returning 'char[2]' from a function with incompatible result type 'float'\n"
              "test.fm:13:29: error: passing 'char[2]' to parameter of incompatible type 'float'\n");
-    // Where C would take it without a word (a void*, a bool, a condition, an operand), FMinus has no type for it.
-    const std::string none =
-        "error: FMinus has no strings: a string literal is only the argument of a builtin's string parameter\n";
+    // Where C would take it without a word (a void*, a bool, a condition, an operand), FMinus has no type for it: C's
+    // char array there is none of FMinus's (a literal is a string only where a string is wanted).
+    const std::string none = "error: FMinus has no char arrays here: a string literal is a 'string' where one is "
+                             "wanted, or the argument of a builtin's string parameter\n";
     CHECK(errorsOf("int a(float* x) { return bytes_floats(\"ab\", 2, x, 1); }\n") == "test.fm:1:39: " + none);
     CHECK(errorsOf("bool b() { bool t = \"a\"; return t; }\n") == "test.fm:1:21: " + none);
     CHECK(errorsOf("float c() { if (\"a\") return 1; return 0; }\n") == "test.fm:1:17: " + none);

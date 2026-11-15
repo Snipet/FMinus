@@ -75,8 +75,8 @@ cmake/
   FMinusOptions.cmake     options, the deps cache, ccache, fminus_target_defaults()
   FMinusLLVM.cmake        LLVM (cache | inline | system) -> FMinus::LLVM
   FMinusParserTools.cmake Bison and Flex (fetch | system; WinFlexBison on Windows) -> fminus_add_grammar()
-  FMinusFastFloat.cmake   fast_float, the parsers' numbers and the web server's (FMINUS_JSON, FMINUS_XML or
-                          FMINUS_WEB_SERVER) -> fminus_fast_float
+  FMinusFastFloat.cmake   fast_float, the numbers of the parsers, the web server and string_float (every build)
+                          -> fminus_fast_float
   FMinusJson.cmake        yyjson, the JSON parser, compiled into the runtime (FMINUS_JSON) -> fminus_yyjson
   FMinusXml.cmake         pugixml, the XML parser, compiled into the runtime (FMINUS_XML) -> fminus_pugixml
   FMinusWeb.cmake         libcurl and Mbed TLS, built at configure time into the deps cache, for the web library
@@ -114,10 +114,13 @@ src/                    the fminus library: every .cpp is a source, every gramma
   ir/                   the syntax tree to LLVM IR: CodeGen.h (ir::lower), Lowering.h (the code generator's class
                         and its parts' map), CodeGen.cpp (the passes), Types, Functions, Statements, Expressions,
                         Constants (integer constant expressions, array sizes, enumerations, the top level's
-                        constants), Calls, Strings (string literals as builtins' arguments, and formats), Paths
-                        (JSON Pointers and XML paths, prepared into tables of steps), Web (a URL literal's checks,
-                        the program's web context, the status codes' names), WebServer (a route literal's checks,
-                        the route table, a reply's format), Files (a file's name checked against the rules and the
+                        constants), Calls, Strings (string literals as builtins' arguments, and formats), Text (the
+                        type string: a literal as one, ==, a switch on one, the string_* builtins), Paths
+                        (JSON Pointers and XML paths, prepared into tables of steps), Shapes (a type's shape, what
+                        the runtime's JSON functions walk: json_read's table of a module, and a JSON literal's
+                        description), Web (a URL literal's checks, the program's web context, the status codes'
+                        names), WebServer (a route literal's checks, the route table, a reply's format), Serve (serve,
+                        route and reply), Within (a deadline for a block's requests), Files (a file's name checked against the rules and the
                         build's ceilings, the program's file context, the status codes' names), Math
                         (the math modes), Hash (hash and randf), Vectors, Memory, Modules, Effects, Tbaa (strict aliasing's tags),
                         Denormals (flush-to-zero; with Denormals.h) and Bounds (bounds checks) .cpp
@@ -166,14 +169,23 @@ examples/<name>/        one example per directory: an FMinus program, and a harn
                         document its host hands it (json_floats, json_base64_floats, xml_floats, the choices),
                         against C++
   fetch/                the wavetable's pack fetched from a loopback server its host allows (http_get, http_wait,
-                        Options::web; a build with FMINUS_WEB)
+                        Options::web; a build with FMINUS_WEB), packs fetched at once in a within, and a table
+                        swapped in by a when on the block it arrives in
   remote/               a synthesiser a browser controls: its gain, pitch and meter served from its nonblocking
                         process (http_listen, http_next, http_is, the replies), its page static content the host
                         hands over; driven over loopback by the library's own client (a build with
                         FMINUS_WEB_SERVER)
+  presets/              a store of named presets kept over HTTP as files: a route's string parameter filled into a
+                        file's name by a hole, each body read into a module with json_read, its fields' ranges and
+                        an enumeration by name checked, and the module stored as JSON, json (preset) (a build with
+                        FMINUS_WEB_SERVER and FMINUS_FILES_WRITE)
   kit/                  a drum kit whose sounds are files: a folder its host grants listed and loaded off the audio
                         thread, played from a nonblocking process, and a take saved (file_list, file_read_nth,
                         file_write, Options::files)
+  trigger/              an envelope a gate triggers, its note-on found by `when` across the host's blocks, against an
+                        if that runs on every sample the gate is high
+  settings/             a synth's settings read from a JSON document in one call (json_read): ranges, defaults, an
+                        enumeration by name, an array of modules, a json::name and a json::skip
   hello/                FMinus as a library at its smallest: a main that JIT-compiles a program from a string
   plugin/               FMinus Filter, a JUCE plugin (AU, VST3, Standalone) whose DSP is an FMinus program: its
                         own CMake project, built apart from FMinus's (cmake -S examples/plugin -B build-plugin)
@@ -288,14 +300,14 @@ float half(float x) { x /= 2; return x; }
 |---|---|
 | program | function definitions, `float name(float a, const float b) { ... }` or `void name(...)`, and prototypes, `float name(float);`; `f(void)` is C's empty list; after the parameters, clang's `[[clang::nonallocating]]` or `[[clang::nonblocking]]`, checked: the function may not reach the heap (nor, nonblocking, an external function not marked so); modules, `module OnePole { float y; float tick(float x) { return y += x; } };`, whose fields are declarations without initialisers and whose methods are functions that see the fields by name (`this` is the module's address); a module's parameters, `param float cutoff [[fminus::range(20, 20000)]] [[fminus::default(1000)]];` (a `float`, `int` or `bool`), which the host sets and a method reads as `cutoff[i]`, its value at sample i of the call; enumerations and constants (below) |
 | declarations | `float x = e;`, `const float k = e;`, `float* p = out;`, several at once (`float a = 1, b;`; in `float *p, x;` only `p` is a pointer, as in C); arrays, `float h[16];` and `int k[3] = {1, 2, 3};` (the elements left out are 0), `float buf[ROWS * COLS];` (a size is C's integer constant expression: an enumeration constant names one, a `const int` does not) and `float t[] = {1, 2, 3};` (its list's length), and a `const` one of constants, `const float t[4] = {1, 2, 3, 4};`, stored once (up to 1 MiB), a constant of the program that no call fills; 2-D arrays, `float grid[4][16];`, rows side by side (C's arrays of arrays), and their lists, rows braced or not, as C places them (`float g[2][3] = {{1, 2}, {3}};`, `int k[][2] = {1, 2, 3};`, two rows), the same everywhere a 1-D array goes; at the top level, constants, C's file-scope const objects: `const float table[ROWS * COLS] = {...};` and `const float gain = 0.5f;`, their initialisers constants (numbers, enumeration constants, `sizeof`, other constant scalars of the top level, `hash` and `randf` of them, an element's address, operators, casts, `?:`, `&&` and `\|\|`), each stored once (up to 1 MiB), which every function and method declared after it reads (an `#include`d file's after the `#include`); modules, `OnePole lp;` and `OnePole b = a;` (a copy); block-scoped, shadowing allowed in an inner block; C's enumerations, `enum Wave { SAW, SQUARE = 4, TRIANGLE };` (`SAW` is 0, `TRIANGLE` 5, each an `int` constant), declared at the top level (the functions and modules after it see its constants), in a module (its methods too) or in a block, a name each in the scope a variable would have, and the names of its type after its list, as C declares them (`enum Wave { SAW, SQUARE } wave;`: a local, a field, or a constant at the top level); C23's fixed underlying type, `enum Wave : int { ... }` or `: bool`, whose constants must fit it, and which declares the tag ahead of its constants too (`enum Wave : int;`) |
-| statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`, `switch (v) { case 1: s ... default: s }` (C's: an `int` or `bool` value, its cases integer constant expressions, which fall through to the next until a `break`; `case` and `default` are C23's labels, so a declaration may follow one); a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever; FMinus's `parallel for (int i = first; i < end; ++i) s`, its iterations at once over the machine's cores, and `parallel { s1 s2 ... }`, its statements at once, each finished, all of it, where it ends (below) |
-| expressions | constants, names, calls, `( )`, unary `-` `+` `!` `~`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(double)x` `(bool)x`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `\|` (the bitwise ones on `int`s), `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %= &= \|= ^= <<= >>=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element), and a 2-D array's `g[i][j]` and its rows, `g[i]`, each a 1-D array, a `float*` wherever one goes; a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int` (a type past the greatest `int`, a module over 2 GB, is an error), arrays' types too, `sizeof(float[4][16])`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0`; C's string literals, as a builtin's argument only (below) |
+| statements | `{ ... }`, `e;`, `return e;` and `return;`, `;`, `if (c) s else s` (an `else` closes the nearest `if`), `while (c) s`, `for (init; c; step) s` (its declarations are the loop's), `break;`, `continue;`, `switch (v) { case 1: s ... default: s }` (C's: an `int` or `bool` value, its cases integer constant expressions, which fall through to the next until a `break`; `case` and `default` are C23's labels, so a declaration may follow one), and a switch on a `string`, `switch (s) { case "saw": ... }`, its cases string literals, the first whose bytes equal the value's taken (WG14 N3895's, with lengths for NULs); C2y's declaration in an `if`'s or a `switch`'s head, `if (int n = count(); n > 0) s else s` and `if (json_doc doc = json_parse(data, bytes)) s` (whose condition is `doc`), its names in scope to the end of the whole statement, the `else` too; `defer s` (or `_Defer s`, ISO/IEC TS 25755's), whose statement runs when control leaves the block the `defer` is in, at its end or by `return`, `break` or `continue`, the last reached first (a `return`'s value is computed before); FMinus's `when (c) s`, which runs `s` each time `c` becomes true (true now, and false the last time this `when` was reached, or never reached: `if (c && !was) s; was = c;`), its state a `bool` of the method's module instance, so a method's statement, which in a loop over samples fires on each rising edge; a `while` or `for` whose condition is not a constant expression may be assumed to end, as in C11 (6.8.5p6), and `while (1)` and `for (;;)` may run for ever; FMinus's `parallel for (int i = first; i < end; ++i) s`, its iterations at once over the machine's cores, and `parallel { s1 s2 ... }`, its statements at once, each finished, all of it, where it ends (below); FMinus's `serve (server) { route "POST /note/{n}" (int n [[fminus::range(0, 127)]]) { ... reply 204; } ... }`, the requests waiting for its routes, each route's parameters filled from the path's holes (a number, or a `string`, a whole segment: `route "PUT /presets/{name}" (string name)`) and the query and checked (404, 400), and `reply`, which answers and leaves the route, a JSON literal `json { "gain": gain, "name": name }` among its forms, in a build with the web server (below); FMinus's `within (ms) { ... }`, a deadline for the requests its block starts: where it ends, every request the thread started in it (or in a function it called) has ended, those still pending at the deadline cancelled (`HTTP_TIMEOUT`), and every wait in it returns by the deadline, in a build with the web library (below) |
+| expressions | constants, names, calls, `( )`, unary `-` `+` `!` `~`, `++` and `--` (before or after), casts `(int)x` `(float)x` `(double)x` `(bool)x`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `\|` (the bitwise ones on `int`s), `&&`, `\|\|` (both short-circuit), `?:` (only the branch taken runs), and `= += -= *= /= %= &= \|= ^= <<= >>=` (right to left; an assignment's value is the one stored), with C's precedence; pointers' `p[i]`, `*p`, `&x`, `p + i`, `p - q` and comparisons; an array's `a[i]` (its name stands for a pointer to its first element), and a 2-D array's `g[i][j]` and its rows, `g[i]`, each a 1-D array, a `float*` wherever one goes; a module's fields `m.y` and `p->y`, its methods `m.tick(x)` and `p->tick(x)`, and `this`; `sizeof(type)`, an `int` (a type past the greatest `int`, a module over 2 GB, is an error), arrays' types too, `sizeof(float[4][16])`; vector literals, OpenCL C's `(float4)(a, b, c, d)` and C's `(float4){a, b}` (the lanes left out are 0), and swizzles `v.wzyx`, `v.s0`; C's string literals, a `string` where one is wanted (an initialiser, an assignment, an argument, a result, an operand of `==` and `!=`, a `case`) and a builtin's literal argument (below); `==` and `!=` of two strings, by content; a `char` array's `name[i]`, an `int` from 0 to 255 |
 | constants | C's: floating ones are floats (`1.5`, `1.`, `.5`, `2e3`, `1.5e-3f`, hex floats `0x1.8p1`, `0x1p-3f`), or, without the `f`, doubles in arithmetic that has a double (below), integer ones ints (`2`, `010` in octal, `0x1F` in hex); `true` and `false`; enumeration constants, ints; integer constant expressions (a case's value, an enumerator's, an array's size) are C's, folded as FMinus computes |
-| attributes | C23's `[[...]]`: after a function's parameters, clang's (above); after a parameter's or a field's name, before an array's sizes, FMinus's `fminus::range(min, max)` (a parameter's, or a field's of numbers: what a host's control or display spans) and `fminus::default(value)` (a parameter's), and any other, the host's, which FMinus passes on as written: `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];`, `float taps [[ui::hidden]] [16];` (but a name without a namespace that C23 does not have, `[[range(0, 1)]]`, is clang's warning, and ignored); their names identifiers, keywords and modules' names among them, as C23 reads them; their arguments numbers and C's string literals (C's escapes; adjacent literals are one) |
+| attributes | C23's `[[...]]`: after a function's parameters, clang's (above); after a parameter's or a field's name, before an array's sizes, FMinus's `fminus::range(min, max)` (a parameter's, or a field's of numbers: what a host's control or display spans, and the values `json_read` fills a field with) and `fminus::default(value)` (a parameter's, or a field's of numbers or `bool`s: what `json_read` sets the field to when a document does not fill it, which does not initialise it; a route's `string` parameter's a string literal, `fminus::default("saw")`, and a `string` field none, as `json_read` leaves one out), `json::name("name")` (the JSON member a field is read as) and `json::skip` (a field `json_read` leaves alone), and any other, the host's, which FMinus passes on as written (FMinus's own too): `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];`, `float taps [[ui::hidden]] [16];` (but a name without a namespace that C23 does not have, `[[range(0, 1)]]`, is clang's warning, and ignored); their names identifiers, keywords and modules' names among them, as C23 reads them; their arguments numbers and C's string literals (C's escapes; adjacent literals are one) |
 | comments | `// ...` and `/* ... */` |
 | directives | `#include "file"`, the file read where the line is, as in C, and once only (as if every file began with `#pragma once`), found where the host says: `fminus` looks beside the including file, then in `-I`'s directories; C's conditionals, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` and `#endif` (and C23's `#elifdef` and `#elifndef`), whose skipped groups are never scanned, on macros that `#define NAME value` and `#undef` make, or the host (`fminus -D NAME[=value]`), read in their conditions only, and FMinus's own, `__FMINUS_JSON__`, `__FMINUS_XML__`, `__FMINUS_WEB__`, `__FMINUS_WEB_SERVER__`, `__FMINUS_FILES__` and `__FMINUS_FILES_WRITE__`, defined (to 1) when the build has the JSON parser, the XML parser, the web library, its server, the file interface or its writing (`FMINUS_JSON`, `FMINUS_XML`, `FMINUS_WEB`, `FMINUS_WEB_SERVER`, `FMINUS_FILES`, `FMINUS_FILES_WRITE`), which neither a program nor the host may define or undefine; `#pragma`, ignored |
-| types | `float` (IEEE single precision), `double` (IEEE double precision: for accumulators and slow state), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; pointers to `float`, `double`, `int`, `float2`, `float4`, `float8` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); arrays of `float`, `double`, `int`, the float vectors and modules, one or two dimensions deep; modules, by name (`OnePole`), from their declaration on; `enum Wave`, an `int`, after its enumeration; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
-| builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf tanf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors (a double argument rounds to a float, as C's prototype converts it); `sqrt fabs floor fmin fmax fma` (C's double functions, exact, on doubles only; `fma` rounds once); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, a `void*`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)`; `hash(n)` (an `int` mixed into a well-spread one) and `randf(n)` (a float uniform in [-1, 1) from it: white noise, `out[i] = randf(start + i)`); bytes to numbers, `bytes_floats(data, bytes, out, cap)` (raw little-endian float32s, as a program's own server sends them) and `bytes_pcm16(data, bytes, out, cap)` (little-endian 16-bit PCM, scaled to [-1, 1)), into floats: how many values the `bytes` bytes at `data` hold, the first `cap` of them written (a null `data` or a negative size is none), wait-free, so a nonblocking function may call them; JSON (`FMINUS_JSON`, below): `json_parse(data, bytes)` (a document, a `void*`, null for a text that is no JSON, over 64 MiB or nested deeper than 1024) and `json_free(doc)`, which allocate, and the reads, wait-free, at a path, a JSON Pointer literal with places for ints (`"/osc/%d/detune", k`): `json_float`, `json_double`, `json_int` and `json_bool` (the value, or their last argument when there is none of that kind), `json_count` (an array's or an object's size), `json_floats(doc, path, out, cap)` (an array of numbers, or of rows of them: how many, the first `cap` written), `json_choice(doc, path, "a", "b", ...)` (which literal a string equals, or -1) and `json_base64_floats(doc, path, out, cap)` (a base64 string's float32s); XML (`FMINUS_XML`, below), the same way: `xml_parse(data, bytes)` (null for a text that is no XML document, over 64 MiB or nested deeper than 1024) and `xml_free(doc)`, which allocate, and the reads, wait-free, at a path, a small part of XPath with places for ints (`"/preset/osc[%d]/@detune", k`: child steps by name, an index **from 0**, a last `@attribute`), of an attribute's value or an element's text: `xml_float`, `xml_double`, `xml_int` and `xml_bool` (the value, or their fallback), `xml_count` (how many elements the last step matches), `xml_floats(doc, path, out, cap)` (a list of numbers, separated by white space or commas) and `xml_choice(doc, path, "a", "b", ...)`; the web (`FMINUS_WEB`, below; [docs/web.md](docs/web.md)): `http_get(url, ...)` and `http_post(url, data, bytes, content_type, ...)` (a request, a `void*`, at once; the URL a literal whose `%d`s are the ints after every other argument, the content type a literal) and `http_cancel(r)` and `http_close(r)`, which allocate, `http_wait(r, timeout_ms)` (the status, once done or the time is up), which blocks (refused in a nonblocking function, allowed in a nonallocating one), and the reads, wait-free: `http_status(r)` (0 while pending, the HTTP status, or a failure, `HTTP_TRANSPORT`, `HTTP_TIMEOUT`, `HTTP_CANCELLED`, `HTTP_REFUSED`, `HTTP_LIMIT`, `HTTP_CERTIFICATE`, `HTTP_INVALID`, `HTTP_FAILED`, names a program uses without declaring them), `http_size(r)` and `http_body(r)` (a `const void*`, until `http_close`), `http_progress(r)`; a null handle does nothing and reads as a failed request; the web server (`FMINUS_WEB_SERVER`, below; [docs/web.md](docs/web.md), "The server"): `http_listen()` (the program's server, a `void*`, where its host's policy says: nowhere by default) and `http_close(server)`, which allocate, `http_accept(server, timeout_ms)` (a request, waiting for one), which blocks, and, wait-free, `http_port(server)` (its port, or `HTTP_REFUSED`, `HTTP_TRANSPORT`, `HTTP_CANCELLED`), `http_next(server)` (the oldest request waiting, or null), `http_is(r, "PUT /osc/%d/gain")` (whether the request is the route, a literal checked when compiled), `http_arg(r, i)` (a number its `%d` took), `http_query_float(r, "name", fallback)` and `http_query_int`, `http_size(r)` and `http_body(r)` (its body), and the replies, `http_reply(r, status)`, `http_reply_bytes(r, status, data, bytes, "type")` and `http_reply_text(r, status, "type", "format", ...)` (C's `printf` of `%d`, `%g`, `%.Ng` and `%%`); the file interface (`FMINUS_FILES`, on by default, below; [docs/files.md](docs/files.md)): `file_read("folder/name.ext", ...)` (the file read whole into memory, a `void*`; the name a literal, a folder the host maps and a path inside it, whose `%d`s are the ints after every other argument), `file_list("folder/*.ext", ...)` (a snapshot of a folder's files that fit, in their names' order), `file_read_nth(list, i)` and `file_close(h)`, which allocate, and the reads, wait-free: `file_status(h)` (`FILE_OK`, or `FILE_MISSING`, `FILE_REFUSED`, `FILE_DENIED`, `FILE_LIMIT`, `FILE_FAILED`, `FILE_INVALID`, names a program uses without declaring them), `file_size(f)` and `file_data(f)` (a `const void*`, until `file_close`), `file_count(list)`; with `FMINUS_FILES_WRITE`, `file_write("folder/name.ext", data, bytes, ...)` (the whole file, replaced in one step or not at all) and `file_append(...)`, which allocate, each giving a status; a null handle reads as no file |
+| types | `float` (IEEE single precision), `double` (IEEE double precision: for accumulators and slow state), `int` (32 bits, signed: C's `/` and `%`, overflow undefined) and `bool` (C23's: 0 or 1, computed as an int; a number is `x != 0` as a bool); `void`, a function's result; `string`, FMinus's: a read-only view of bytes something else owns, a pointer and a length (C's `struct { const char* data; int size; }`), no NUL after it and no encoding checked, compared by content, read by the `string_*` builtins, empty (null, 0) until set, and a literal one for ever; `char`, an array's element and a pointer's pointee only (`char name[32];`, `const char* p`), a byte read as an `int` from 0 to 255, where a program keeps text (`string_copy`, `string_of`, `char name[8] = "abc";`); pointers to `float`, `double`, `int`, `float2`, `float4`, `float8`, `char` and modules, `const` (`const float*`, read-only through it) and `restrict` (C99's promise that nothing else reaches it), and `void*` (an address with no type, which converts to and from any pointer); the handles of the runtime's objects, `http_response` (a request the program made), `http_request` (one it received), `http_server`, `json_doc`, `xml_doc`, `file_content`, `file_listing` and `fft_plan`, each C's opaque handle (`typedef struct fminus_json_doc* json_doc;`): what a builtin gives and others take, a `void*` converted to one and back, as C converts it, and one of another kind refused; compared with `==` and `!=`, tested as a condition (null is false), and kept in arrays; no arithmetic, element or field, and no pointer to one; arrays of `float`, `double`, `int`, the float vectors, `char`, `string`, modules and handles, one or two dimensions deep; modules, by name (`OnePole`), from their declaration on; `enum Wave`, an `int`, after its enumeration; `float2`, `float4`, `float8` (OpenCL C's vectors, lane by lane, scalars broadcast); `poly float` and `poly bool`, as many lanes as the machine's vectors ([docs/simd.md](docs/simd.md)) |
+| builtins | `fabsf sqrtf floorf fminf fmaxf` (LLVM intrinsics, exact) and `sinf cosf tanf expf logf tanhf` (by the math mode: the runtime's, with one result for a float wherever it is computed, by default), on floats and vectors (a double argument rounds to a float, as C's prototype converts it); `sqrt fabs floor fmin fmax fma` (C's double functions, exact, on doubles only; `fma` rounds once); `malloc calloc free` (C's, with `int` sizes); `reduce_add reduce_min reduce_max` (a vector to a float); `poly_lanes` (an int) and `poly_index`; `poly_load poly_store` (a poly float from or to a `float*`, with an optional mask); the FFT: `fft_create(n)` and `fft_create_complex(n)` (a plan, an `fft_plan`; they allocate), `fft_forward(plan, in, out)` and `fft_inverse(plan, in, out)` (real when one side is floats, complex when both are `float2`s; unnormalised), `fft_destroy(plan)`; `hash(n)` (an `int` mixed into a well-spread one) and `randf(n)` (a float uniform in [-1, 1) from it: white noise, `out[i] = randf(start + i)`); bytes to numbers, `bytes_floats(data, bytes, out, cap)` (raw little-endian float32s, as a program's own server sends them) and `bytes_pcm16(data, bytes, out, cap)` (little-endian 16-bit PCM, scaled to [-1, 1)), into floats: how many values the `bytes` bytes at `data` hold, the first `cap` of them written (a null `data` or a negative size is none), wait-free, so a nonblocking function may call them; JSON (`FMINUS_JSON`, below): `json_parse(data, bytes)` (a document, a `json_doc`, null for a text that is no JSON, over 64 MiB or nested deeper than 1024) and `json_free(doc)`, which allocate, and the reads, wait-free, at a path, a JSON Pointer literal with places for ints (`"/osc/%d/detune", k`): `json_float`, `json_double`, `json_int` and `json_bool` (the value, or their last argument when there is none of that kind), `json_count` (an array's or an object's size), `json_floats(doc, path, out, cap)` (an array of numbers, or of rows of them: how many, the first `cap` written), `json_choice(doc, path, "a", "b", ...)` (which literal a string equals, or -1), `json_base64_floats(doc, path, out, cap)` (a base64 string's float32s), `json_read(doc, path, ..., &module)` (the module filled from the object there, field by field under each field's name in one walk of it, and whether every field without a default was filled), `json_slice(array, count)` (an array's first `count` elements, or a pointer's, as a JSON literal's value and nowhere else) and `json_string(doc, path, ..., fallback)` (the string there, unescaped, a `string` until `json_free`, or the fallback); XML (`FMINUS_XML`, below), the same way: `xml_parse(data, bytes)` (an `xml_doc`, null for a text that is no XML document, over 64 MiB or nested deeper than 1024) and `xml_free(doc)`, which allocate, and the reads, wait-free, at a path, a small part of XPath with places for ints (`"/preset/osc[%d]/@detune", k`: child steps by name, an index **from 0**, a last `@attribute`), of an attribute's value or an element's text: `xml_float`, `xml_double`, `xml_int` and `xml_bool` (the value, or their fallback), `xml_count` (how many elements the last step matches), `xml_floats(doc, path, out, cap)` (a list of numbers, separated by white space or commas) `xml_choice(doc, path, "a", "b", ...)` and `xml_string(doc, path, ..., fallback)` (an attribute's value or an element's text, trimmed, a `string` until `xml_free`, or the fallback); the web (`FMINUS_WEB`, below; [docs/web.md](docs/web.md)): `http_get(url, ...)` and `http_post(url, data, bytes, content_type, ...)` (a request, an `http_response`, at once; the URL a literal whose `%d`s are the ints after every other argument, or whose holes name its values where they go, `"https://example.com/presets/{name}.json"`, an `int`, a `bool`, an enumeration's value or a `string`, percent-encoded; the content type a literal), `http_post(url, json ..., ...)` (its body a JSON literal, sent as `application/json`) and `http_cancel(r)` and `http_close(r)`, which allocate, `http_wait(r, timeout_ms)` (the status, once done or the time is up), which blocks (refused in a nonblocking function, allowed in a nonallocating one), and the reads, wait-free: `http_status(r)` (0 while pending, the HTTP status, or a failure, `HTTP_TRANSPORT`, `HTTP_TIMEOUT`, `HTTP_CANCELLED`, `HTTP_REFUSED`, `HTTP_LIMIT`, `HTTP_CERTIFICATE`, `HTTP_INVALID`, `HTTP_FAILED`, names a program uses without declaring them), `http_size(r)` and `http_body(r)` (a `const void*`, until `http_close`; of a request received too), `http_progress(r)`; a null handle does nothing and reads as a failed request; the web server (`FMINUS_WEB_SERVER`, below; [docs/web.md](docs/web.md), "The server"): `http_listen()` (the program's server, an `http_server`, where its host's policy says: nowhere by default) and `http_close(server)`, which allocate, `http_accept(server, timeout_ms)` (a request, an `http_request`, waiting for one), which blocks, and, wait-free, `http_port(server)` (its port, or `HTTP_REFUSED`, `HTTP_TRANSPORT`, `HTTP_CANCELLED`), `http_next(server)` (the oldest request waiting, or null), `http_is(r, "PUT /osc/%d/gain")` (whether the request is the route, a literal checked when compiled), `http_arg(r, i)` (a number its `%d` took), `http_query_float(r, "name", fallback)` and `http_query_int`, its text, each a `string` until the reply: `http_header(r, "name")` (its first field of the name, without the white space around it, or empty), `http_path(r)` (its path as sent) and `http_query_string(r, "name", fallback)` (a query's field as sent, nothing decoded), `http_size(r)` and `http_body(r)` (its body), and the replies, `http_reply(r, status)`, `http_reply_bytes(r, status, data, bytes, "type")`, `http_reply_text(r, status, "type", "format", ...)` (C's `printf` of `%d`, `%g`, `%.Ng`, `%s`, a `string`, and `%%`) and `http_reply_json(r, status, json ...)` (a JSON literal, written in the request's own buffer); the file interface (`FMINUS_FILES`, on by default, below; [docs/files.md](docs/files.md)): `file_read("folder/name.ext", ...)` (the file read whole into memory, a `file_content`; the name a literal, a folder the host maps and a path inside it, whose `%d`s are the ints after every other argument, or whose holes name its values, `"presets/{name}.json"`, a `string`'s joining its segment and checked when filled in, `FILE_INVALID` when it breaks a rule), `file_list("folder/*.ext", ...)` (a snapshot of a folder's files that fit, in their names' order, a `file_listing`), `file_read_nth(list, i)` (a `file_content`) and `file_close(h)` (of either), which allocate, and the reads, wait-free: `file_status(h)` (`FILE_OK`, or `FILE_MISSING`, `FILE_REFUSED`, `FILE_DENIED`, `FILE_LIMIT`, `FILE_FAILED`, `FILE_INVALID`, names a program uses without declaring them), `file_size(f)` and `file_data(f)` (a `const void*`, until `file_close`), `file_count(list)`, `file_name(list, i)` (the i-th file's own name, a `string` until `file_close`, empty outside the listing); with `FMINUS_FILES_WRITE`, `file_write("folder/name.ext", data, bytes, ...)` (the whole file, replaced in one step or not at all) and `file_append(...)`, which allocate, each giving a status, and each taking a JSON literal in place of its bytes, `file_write("out/{name}.json", json (preset))` (`file_append` adding a newline after it: JSON Lines); a null handle reads as no file. Each handle a builtin takes may be a `void*`, as before FMinus had handles, and a JSON or XML read's document a `const void*` too; a string's, every one wait-free, in every build: `string_size(s)` (its length in bytes), `string_byte(s, i)` (byte `i` as 0 to 255, or -1 outside it), `string_slice(s, from, to)` (the bytes from `from` up to `to`, each end clamped to the string; empty when they cross), `string_find(s, what)` (where `what` first occurs, or -1; an empty `what` at 0), `string_starts(s, with)` and `string_ends(s, with)`, `string_float(s, fallback)` and `string_int(s, fallback)` (the whole string read as a number as a query's is: no `+`, finite, an `int` that fits; else the fallback), `string_data(s)` (its bytes' address, a `const void*`), `string_copy(out, cap, s)` (its first `cap` bytes at most into a `char` array, and its length) and `string_of(data, size)` (a view of `size` bytes at `data`, a `const char*` or a `void*`: `string_of(http_body(r), http_size(r))` reads a body as text; a null `data` or a negative size is the empty string) |
 
 Where FMinus differs from C, it is on purpose:
 
@@ -312,13 +324,13 @@ Where FMinus differs from C, it is on purpose:
   differ from C's in its last bits: write the `f` suffix (`1.5f`) and a program means the same in both. Every example
   here does. An integer constant is an `int`, as in C, so `1 / 2` is 0; one too large for an `int` is an error, where C
   would make it a `long` ([docs/extending.md](docs/extending.md), recipe 33).
-- **Pointers point to `float`, `double`, `int`, `float2`, `float4`, `float8`, `void` or a module, one level deep**: no
+- **Pointers point to `float`, `double`, `int`, `float2`, `float4`, `float8`, `char`, `void` or a module, one level deep**: no
   pointers to pointers or to arrays, no `bool*`, no null pointer constant (`0` is an int; an uninitialised pointer is
   null) and no casts between pointer types. Converting a pointer to one of another type (other than through a `void*`),
   or dropping its `const`, is an error, where C warns. A 2-D array's name stands for a pointer to its first row, as in
   C (`float (*)[16]`): indexed, dereferenced, moved and compared as C's, but no variable, parameter or field holds one,
   and `&g[i]` is an error.
-- **Arrays are C's, one or two dimensions deep**: of `float`, `double`, `int`, the float vectors or modules (no arrays
+- **Arrays are C's, one or two dimensions deep**: of `float`, `double`, `int`, the float vectors, `char`, strings or modules (no arrays
   of three dimensions, of pointers or of `bool`), each size an integer constant expression from 1 to 2^30, and 2^30
   elements in all (no variable length arrays, and no zero-length ones, GNU's), and zeroed like every variable. An
   initialiser list may be shorter than the array, never longer, and a brace around one element (a 1-D array's, or
@@ -328,6 +340,24 @@ Where FMinus differs from C, it is on purpose:
   call reads the same elements as C's would, but from one object, so its address is the same in every call, nested
   ones too, where C gives each call its own, and two equal tables may be one object
   ([docs/extending.md](docs/extending.md), recipes 26 and 34).
+- **The handle types are keywords**, where C's would be a header's typedefs (`typedef struct fminus_json_doc*
+  json_doc;`): no variable or function may be named `json_doc`, as none may be named `float4`. A handle is C's pointer
+  to a struct the program never sees, and does what C lets one do, but for `<`, `<=`, `>` and `>=`, which C allows
+  between two of a kind and FMinus refuses (their order means nothing), and arrays of them, which FMinus has though it
+  has no other arrays of pointers. A `void*` still converts to any handle, as in C, so a program written with `void*`
+  before the handles came compiles as it did, unchecked as it was; and a JSON or XML read still takes a `const void*`
+  document, which C would refuse for a typed one (the read only reads it). A handle is no parameter declared as an
+  array (that would be a pointer to one), and `call()` and `--run` treat one as they treat a `void*`
+  ([docs/extending.md](docs/extending.md), recipe 44).
+- **`defer` is ISO/IEC TS 25755's**, a Technical Specification beside C, not yet C itself: `_Defer`, and `defer`, which
+  the TS encourages, both keywords (FMinus substitutes no macros, so `<stddefer.h>`'s way is not open). It is a
+  rewrite when the program is compiled, as clang's `-fdefer-ts` makes it: each exit of a block holds the code of the
+  deferred statements of the blocks it leaves, with no flag or list at run time. A call that the loop budget or a
+  bounds check stops returns at once, as it always has, and runs no deferred statement on the way, as the TS says of
+  `exit` and a signal: those checks are made in the optimised code, where the blocks are gone
+  ([docs/extending.md](docs/extending.md), recipe 44).
+- **`if` and `switch` take C2y's declaration in their head** (N3356, as N3580 refines it), which C23 does not have.
+  FMinus has no storage classes, so N3580's constraint on them has nothing to check.
 - **The top level holds no variables**, only constants: a declaration there is `const`, its initialiser constants, a
   constant of the program, as C's file-scope const object is (an LLVM constant global of its name, of 1 MiB at
   most), which no call fills or copies. A program's state lives in its modules, each instance's own. C has
@@ -358,23 +388,68 @@ Where FMinus differs from C, it is on purpose:
   sample at a time when it is flat.
 - **A field's attributes are the host's**: C23 ignores an attribute it does not know, and clang warns; FMinus passes a
   field's or a parameter's on to the host as written (`Module::Field::attributes`), checking only that its numbers
-  are numbers, for the host to decide what `[[ui::unit("dB")]]` means. Its own namespace, `fminus::`, is checked (an
-  unknown name is an error), and so is clang's, whose attributes are a function's; a function's unknown attribute, a
-  local's and a constant's, and one after an array's size (C23's, for the array's type) are errors too. A name
-  without a namespace is C's: one of C23's standard attributes goes to the host, and any other, `[[range(0, 1)]]`,
-  is clang's warning (`unknown attribute 'range' ignored [-Wunknown-attributes]`, with a note, "did you mean
-  'fminus::range'?"), and goes nowhere. A string literal is C's, and an attribute's argument or a builtin's (below)
-  ([docs/extending.md](docs/extending.md), recipe 35).
-- **A string literal is an argument, never a value.** FMinus has no `char`, so a literal is only an attribute's
-  argument or the argument of a builtin's string parameter, which gets its bytes and their length: no NUL ends it,
-  and `"a\0b"` is three bytes. Anywhere else, where C would have a `char` array, it is an error, in clang's words and
-  at clang's column where C converts one with a warning or refuses it (`passing 'char[2]' to parameter of incompatible
-  type 'float'`), and in FMinus's, at the literal, where C would take it silently (as a `void*`, a `bool`, an operand), so a program
-  FMinus accepts means the same in C. A builtin's format, a literal with places for ints, is checked as clang checks
+  are numbers, for the host to decide what `[[ui::unit("dB")]]` means. Its own namespaces, `fminus::` and `json::`, are
+  checked (an unknown name is an error), and so is clang's, whose attributes are a function's; a function's unknown
+  attribute, a local's and a constant's, and one after an array's size (C23's, for the array's type) are errors too.
+  A name without a namespace is C's: one of C23's standard attributes goes to the host, and any other,
+  `[[range(0, 1)]]`, is clang's warning (`unknown attribute 'range' ignored [-Wunknown-attributes]`, with a note,
+  "did you mean 'fminus::range'?"), and goes nowhere. A string literal is C's, and an attribute's argument or a
+  builtin's (below) ([docs/extending.md](docs/extending.md), recipes 35 and 50).
+- **`string` is FMinus's own, and `char` only an element**: text is a read-only view, a pointer and a length over
+  bytes something else owns (C would need `typedef struct { const char* data; int size; } string;` and a function for
+  `==`), where C's is a `char*` that a NUL ends. A piece of a request's path or of a JSON document has no NUL after it,
+  so a C string would be a copy, a length a scan, and every overrun undefined; a view reads what the runtime already
+  holds, allocates nothing, and every operation on it is wait-free, allowed in a `[[clang::nonblocking]]` function.
+  Nothing joins or builds one: text is made only where it goes (a hole of an address, a JSON literal, a reply's
+  `%s`). `==` and `!=` compare two by
+  content; `<`, `+`, `[]`, a cast and a test as a condition are errors (`string_size(s) > 0` asks whether one is
+  empty). **A string lives as long as what it points into**, the rule `http_body`'s pointer has: one over a `char`
+  array as long as the array, a literal for ever, one that came from a request until the request's reply, one from a
+  document until `json_free` or `xml_free`, and one from a listing until its `file_close`. The compiler does not check
+  it. A string is no `param`, no vector's lane, and no
+  parameter or result of `main` or of a function the program declares and does not define (C's ABI passes a struct
+  by each platform's own rules); `call()` and `--run` pass none. Text comes from a literal, a request (a route's
+  `string` parameter, `http_header`, `http_path`, `http_query_string`), a document (`json_string`, `xml_string`) or a
+  listing (`file_name`), each a view of the bytes it already holds ([docs/extending.md](docs/extending.md), recipe
+  48). `char` is a byte an array holds or a pointer points to, never a variable, a
+  parameter or a result, and an element reads as an `int` from 0 to 255 on every machine (C
+  leaves a plain `char`'s sign to the implementation; FMinus's is unsigned, as clang's `-funsigned-char` makes it); a
+  store keeps the low 8 bits. A `char` array is read and written as `char`s only: FMinus's `char` has none of C's
+  licence to alias other types. `string`, `char` and `when` are keywords ([docs/extending.md](docs/extending.md),
+  recipe 46).
+- **`when` is FMinus's own**, as C has no state but what a program declares: `when (c) s` is `if (c && !was) s;
+  was = c;`, `c` computed once and `was` stored before `s` runs (so a `return`, `break` or `continue` in `s` does not
+  arm it again), `was` a `bool` the compiler keeps in the instance of the method's module, after the declared fields,
+  one for each `when`. So it is a method's statement (anywhere else an error that says where its state would live);
+  `sizeof` a module grows by its `when`s' bools, which `module()` lists no field for but its size and alignment count,
+  and a copy of the module copies them; it is refused in a `parallel for`'s iteration and a `parallel { }` block's
+  statement, where it would change the module from several threads, as a method that changes its module is; a
+  `poly bool` condition is an error (a `when` is one decision). It allocates and waits for nothing, so a
+  `[[clang::nonblocking]]` method may hold one ([docs/extending.md](docs/extending.md), recipe 47).
+- **A string literal is a `string` where one is wanted, and otherwise an argument, never a value.** It is a value of
+  type `string` as an initialiser, an assignment's value, an argument or a result of the program's own function, an
+  operand of `==` or `!=`, an arm of a `?:` that gives a string, or a `case` of a switch on a string; its bytes are a
+  constant of the program, C's escapes resolved and adjacent literals one, with no NUL counted (`"a\0b"` is three
+  bytes). It is an attribute's argument, and the argument of a builtin's string parameter, which gets its bytes and
+  their length and takes only a literal (a `string` variable there is an error). Anywhere else, where C would have a
+  `char` array, it is an error, in clang's words and at clang's column where C converts one with a warning or refuses
+  it (`passing 'char[2]' to parameter of incompatible type 'float'`), and in FMinus's, at the literal, where C would
+  take it silently (as a `void*`, a `bool`, an operand). `char name[8] = "abc";` is C's: the literal's bytes, the rest
+  0, an error if they do not fit. A builtin's format, a literal with places for ints, is checked as clang checks
   `printf`'s, but takes only `%d` (an `int`, an enumeration's or a `bool`) and `%%`, and its mistakes, clang's
   warnings, are errors ([docs/extending.md](docs/extending.md), recipe 38). A path into a JSON document is such a
   format and a JSON Pointer too, and one into an XML document such a format and an XML path, each prepared when the
   program is compiled; a malformed one is an error at its column.
+- **An address names its values in holes, `{name}`**, where `printf` has `%d` and the values after the format:
+  `http_get("https://example.com/presets/{name}/{k}.json")`, `file_write("presets/{name}.json", data, bytes)`,
+  `route "PUT /presets/{name}" (string name)`. A hole is a variable in scope (Rust's rule for its formats: a name,
+  not an expression), an `int`, a `bool`, an enumeration's value (written in decimal, as `%d` is) or a `string`, and
+  a literal has `%d`s or holes, never both; `{{` and `}}` are a brace. What a string may become is the library's to
+  check where it goes: in a URL, percent-encoded, every byte but the unreserved ones, so it cannot add a `/`, a `?` or
+  a `#`, and never in the scheme or the host (a port takes an `int`); in a file's name, one segment's part, never the
+  folder or the extension, checked by the rules a literal's segments are (`FILE_INVALID` otherwise); in a route, a
+  whole segment. The host's lists keep a `*` for each hole, as for each `%d` ([docs/extending.md](docs/extending.md),
+  recipe 48).
 - **JSON is FMinus's own**, as C has none: builtins on yyjson ([docs/extending.md](docs/extending.md), recipe 39).
   `json_parse` reads RFC 8259's JSON and nothing else (no comments, trailing commas, `NaN` or byte order mark; its
   strings' UTF-8 checked), and gives no document for more than 64 MiB of text, or for arrays and objects nested deeper
@@ -388,8 +463,21 @@ Where FMinus differs from C, it is on purpose:
   an object's members, or an array of arrays or objects, up to the one it names (an index into an array of numbers
   and strings goes straight there), and a value is read whole, every digit of a number and every character of a
   base64 string, so one read of a large hostile document can take milliseconds, and a `%d` loop over n members or
-  elements takes time in n². Read a document in `init`, into arrays, and keep the audio thread to those. There is no way to get a string itself out of a document: `json_choice` says which of the program's
-  literals it equals.
+  elements takes time in n². Read a document in `init`, into arrays, and keep the audio thread to those. A string comes
+  out of a document as a view, `json_string` (unescaped as the parser holds it, until `json_free`), or `json_choice`
+  says which of the program's literals it equals. `json_read(doc, path, ..., &module)` fills a module from the object at
+  a path in one walk of its members, by a table of the module's fields the compiler makes once a type
+  ([docs/extending.md](docs/extending.md), recipe 50): each field from the member of its name, or of its
+  `[[json::name("...")]]`, and only from a value of its kind inside its `fminus::range` (an `int` from an integer an
+  `int` holds, an enumeration from its constant's name as written, `"SAW"`, or its number, a `char` array from a string
+  that fits with room for a 0, an array from as many elements as fit); a member no field names is ignored. A field not
+  filled is set to its `fminus::default`, or left as it was, and the result says whether every field without a default
+  was filled. **A field's `fminus::default` does not initialise it**: a module's fields start at 0, as C's do, and the
+  default is what `json_read` sets when a document does not fill the field. **A `string` field is not filled** (it would
+  point into the document, which the module outlives), nor a `param` (its value is the host's), a pointer, a handle, a
+  poly type or a field with `[[json::skip]]`; an array of modules the document does not have is left as it was, its
+  elements' defaults unset. It is wait-free, as the other reads are, and costs a walk of the object, each member
+  compared with the fields not yet named.
 - **XML is FMinus's own too**, on pugixml, made as the JSON builtins are ([docs/extending.md](docs/extending.md),
   recipe 40): the same fallbacks, effects, limits (`FMINUS_XML_MAX_BYTES`, `FMINUS_XML_MAX_DEPTH`) and null
   document. **An index in an XML path counts from 0**, as C's arrays and JSON Pointer's do, where XPath's counts from
@@ -406,11 +494,12 @@ Where FMinus differs from C, it is on purpose:
   its element's, and a value is read whole.
 - **The web is FMinus's own**, as C has none: builtins on libcurl, in a build with `FMINUS_WEB` ([docs/web.md](docs/web.md),
   and [docs/extending.md](docs/extending.md), recipe 41). A URL is a string literal, a format whose ints come after
-  every other argument, as `printf`'s do, and is checked where it is written: printable ASCII with no space or
+  every other argument, as `printf`'s do, or holes (above), and is checked where it is written: printable ASCII with
+  no space or
   backslash (no CR or LF), `http` or `https`, no credentials. Its requests reach only what its host allows
-  (`Program::Options::web`: none by default), and the host can list every URL before anything runs
+  (`Program::Options::web`: none by default), and the host can list every URL before anything runs, a hole a `*`
   (`Program::webRequests()`); the library checks each request, each redirect and each connection's address. A request
-  is a `void*` that comes back at once; failures are statuses (`HTTP_REFUSED`, `HTTP_TIMEOUT`, ...), never traps.
+  is an `http_response` that comes back at once; failures are statuses (`HTTP_REFUSED`, `HTTP_TIMEOUT`, ...), never traps.
   `http_wait` is a builtin that blocks: refused in a `[[clang::nonblocking]]` function, allowed in a
   `[[clang::nonallocating]]` one. A program that uses a table on the block it arrived in gives up determinism: fetch in
   `init`, then play.
@@ -419,15 +508,49 @@ Where FMinus differs from C, it is on purpose:
   nor do FMinus programs, so a program **takes** its requests (`http_next`, wait-free, on the audio thread between
   blocks; `http_accept`, which blocks, on a thread of its host's) and answers each with a reply builtin. A route is a
   string literal, a method and a path whose `%d`s are numbers of the request's path, checked where it is written and
-  listed for the host (`Program::webRoutes()`); a reply's text is a format of C's `printf`, `%d`, `%g`, `%.Ng` and `%%`,
-  checked as clang checks `printf`'s and written the same in every locale. Where it listens is the host's
+  listed for the host (`Program::webRoutes()`); a reply's text is a format of C's `printf`, `%d`, `%g`, `%.Ng`, `%s` (a
+  `string`) and `%%`, checked as clang checks `printf`'s and written the same in every locale. Where it listens is the
+  host's
   (`Program::Options::web.server`: nowhere by default), never the program's: `http_listen()` takes no argument. The
   library answers 404 and 405 for what no route names, and checks `Host`, `Origin`, `Sec-Fetch-Site`, the token and
-  every limit before a request reaches the program. A program never sees a request's path as text, nor a header.
+  every limit before a request reaches the program. A program reads a request's text only as views of what the library
+  holds (`http_path`, `http_header`, `http_query_string`), until its reply; with a token, `Authorization` reads empty.
+- **`serve`, `route` and `reply` are FMinus's own statements** over those builtins, as `parallel` is ([docs/web.md](
+  docs/web.md), "serve, route and reply", and [docs/extending.md](docs/extending.md), recipe 45): a `serve` takes the
+  requests waiting for its own routes only (wait-free; with a timeout it blocks), a route's parameters are typed and
+  filled from its literal's holes, `{name}` (an `int`, or a `string`, a whole segment), and the query (a `string` its
+  bytes as sent, nothing decoded; what does not fit is 404 or 400 before its block runs), and
+  `reply` answers the route's request and leaves the route, which every path through the route must reach, so a request
+  a serve takes is answered once. Two routes one request could match are an error unless one is more specific (Go's
+  `ServeMux` rule: a literal segment before a number's hole before a string's). `serve`, `route`, `reply` and `json` are
+  keywords: nothing may be named so.
+- **`within` is FMinus's own statement** too ([docs/web.md](docs/web.md), "within", and
+  [docs/extending.md](docs/extending.md), recipe 49): `within (ms) { ... }` is `parallel { }`'s promise for requests,
+  Trio's `move_on_after` with C's syntax. Where its block ends, by its brace, `return`, `break`, `continue` or a
+  `reply`, every request the thread running it started in it has ended: the end waits for them until the deadline and
+  cancels what is left (`HTTP_TIMEOUT`); and the deadline bounds every wait in it (`http_wait`, `http_accept`, a
+  `serve` with a timeout). An inner block cannot outlast an outer one. It waits, and its beginning allocates, so a
+  `[[clang::nonblocking]]` function refuses it in the words it refuses `http_wait` in, and a
+  `[[clang::nonallocating]]` one as an allocation. A call the loop budget or a bounds check stops leaves no block of
+  its thread's behind (its requests go on as any other), though it runs no deferred statement. `within` is a keyword;
+  `await` is not.
+- **A JSON literal is an argument, never a value**, as a format is: `json { "gain": gain, "name": name, "taps": taps
+  }`, `json [a, b]` or `json (preset)` (one value), the body of a `reply` and `http_reply_json`, of `http_post` (sent as
+  `application/json`) and of `file_write` and `file_append` (which adds a newline: JSON Lines), which the runtime's JSON
+  writer writes straight where it goes (a reply's own buffer; a POST's or a file's buffer of exactly the text's size,
+  measured first) from a description the compiler makes: a float's and a double's numbers the shortest digits that read
+  back the same, a NaN or an infinity `null`, a `string` (or a literal) a JSON string escaped as RFC 8259 asks (`"`, `\`
+  and the controls; bytes above 0x7F as they are), **an enumeration's value its constant's name** (`"SAW"`; a value no
+  constant has, its number), a `char` array its text, arrays (of two dimensions too) and vectors JSON arrays, a module an
+  object of its fields under their JSON names (as `json_read` reads them; a `string` field too; a parameter only as
+  `*this` in its own method), and `json_slice(array, count)` an array's first elements ([docs/web.md](docs/web.md), "The
+  JSON literal"). It needs the JSON writer, part of `FMINUS_JSON`. FMinus has no JSON value, and C no literal of the
+  kind.
 - **Files are FMinus's own too**, in place of C's `<stdio.h>`, in a build with `FMINUS_FILES` (on by default;
   [docs/files.md](docs/files.md), and [docs/extending.md](docs/extending.md), recipe 43). A program never names a path
   of the machine: a name is a string literal, a folder its host maps and a path inside it (`"presets/%d.json"`, its
-  ints after every other argument), checked where it is written (no `..`, no hidden file, no device name of Windows,
+  ints after every other argument, or `"presets/{name}.json"`, a hole), checked where it is written (no `..`, no
+  hidden file, no device name of Windows,
   nothing Windows would read otherwise, an extension the literal writes) and listed for the host before anything runs
   (`Program::files()`). It reaches only the folders its host grants (`Program::Options::files`: none by default), and
   the runtime decides from what it opened, not from the name's text: each directory opened beneath the last, no link
@@ -457,8 +580,9 @@ Where FMinus differs from C, it is on purpose:
 - **Memory is read and written as the type it holds**, C's strict-aliasing rule, which FMinus tells LLVM as clang
   does (TBAA): an `int` read as a `float` through a `void*` is undefined. FMinus is stricter in three places: a float
   vector or `poly float` is its elements' type, `float`; allocated memory keeps one type at each place until it is
-  freed (C lets a store give it a new one); and there is no character type, so only a module's copy and a declaration's
-  zeroing read or write bytes of any type. `--no-strict-aliasing` or `Program::Options::strictAliasing = false` turns
+  freed (C lets a store give it a new one); and FMinus's `char` is a type of its own, which aliases nothing else, so
+  only a module's copy and a declaration's zeroing read or write bytes of any type (and `string_byte`, which reads what
+  a string views, whatever it is). `--no-strict-aliasing` or `Program::Options::strictAliasing = false` turns
   the rule off, as clang's `-fno-strict-aliasing` does.
 - **`sinf`, `cosf`, `tanf`, `expf`, `logf` and `tanhf` give a float one result wherever it is computed**: in a scalar
   loop or its vectorised body, in a vector of any width, at any optimisation level, from a constant or not, on any
@@ -753,8 +877,9 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   them in order, a parameter's too (and its `Parameter::attributes`), each a `Program::Attribute`: its `name` as written
   (`"ui::unit"`) and its `arguments`, each a number (`number`, and `text` as written, `"-60"`) or a string (`isString`,
   `text` its bytes, C's escapes resolved, UTF-8 as the source has it). `findAttribute(attributes, "ui::unit")` is the
-  last of a name, or null. FMinus gives meaning to its own, `fminus::range` (a parameter's or a field's of numbers) and
-  `fminus::default` (a parameter's), and passes every other on unread: a unit, a label, a display hint, whatever the
+  last of a name, or null. FMinus gives meaning to its own, `fminus::range` (a parameter's or a field's of numbers),
+  `fminus::default` (a parameter's, or a field's of numbers or `bool`s, for `json_read`), `json::name` and `json::skip`,
+  and passes them and every other on, the others unread: a unit, a label, a display hint, whatever the
   host defines. Name a host's in a namespace of its own (`ui::`), as C23 keeps names without one for its standard
   attributes: one without a namespace that is none of those (`[[range(0, 1)]]`) is a warning in `warnings()`, and in
   no `attributes` list. `examples/meter/` labels its readings so ([docs/extending.md](docs/extending.md), recipe 35).
@@ -833,7 +958,7 @@ gain(in, out, n, 0.5f);                                       // one call a bloc
   ([docs/web.md](docs/web.md)). With `FMINUS_WEB_SERVER` too, `Options::web.server` is where the program's
   `http_listen` may listen (`"localhost:0"`, ...; nowhere by default), with a token, the names a `Host` may say, the
   static files the library serves for it (a page), and its limits; `webRoutes()` lists every route the program names,
-  before anything runs; `webPort()` is the port it listens on; and `stopWeb()` and the destructor close its server,
+  before anything runs, a route statement's with its parameters (name, type, path or query, range, default); `webPort()` is the port it listens on; and `stopWeb()` and the destructor close its server,
   waking a thread in `http_accept`.
 - **Files.** In a build with `FMINUS_FILES` (the default), `Options::files` is what the program may reach through
   `file_read`, `file_list`, `file_write` and `file_append`: its folders (a name, a directory, whether it may be written,
@@ -1003,7 +1128,7 @@ preset has a workflow (`cmake --workflow --preset <name>`) except `xcode`, which
 ## Handy
 
 - `build-dev/bin/fminus-hostinfo [--features]`: the triple, CPU, features and data layout the JIT targets here.
-- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.19.0.vsix`, for
+- VSCode: `python3 editors/vscode/package.py`, then `code --install-extension build-vscode/fminus-0.25.0.vsix`, for
   FMinus syntax highlighting, lit's `RUN:` and `CHECK:` lines included
   ([editors/vscode/README.md](editors/vscode/README.md)).
 - `build-dev/bin/fminus`: FMinus source to its tree, IR, assembly or an object, or run in the JIT (above).

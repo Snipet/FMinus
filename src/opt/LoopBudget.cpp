@@ -52,6 +52,9 @@
 //   budget.unwind:                                   ; the callee ran out: return, and write nothing
 //     ret i32 0
 //
+// In a function that begins a within block's deadline scope, budget.stop and budget.unwind first abandon the thread's
+// scopes, a call of fminus_web_http_within_abandon before the ret (opt/EarlyReturn.h, returnEarly).
+//
 // The branch to the stop is marked unlikely, so the code generator puts it out of the loop's way: on arm64 a loop's
 // charge is a SUBS and a B.MI where it starts, and a branch back's a SUB and a TBZ. What runs out is reported once,
 // by the function where the count went below zero; the functions that return after it write nothing, so `left` holds

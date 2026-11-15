@@ -1,0 +1,18 @@
+// In a build without the web library (FMINUS_WEB=OFF, the default), a within is parsed, and is the error http_wait
+// gives there, once, at the within; its block is lowered for its own errors.
+// UNSUPPORTED: web
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+int load(int ms)
+{
+    int n = 0;
+    within (ms)
+    {
+        n = n + missing;
+    }
+    return n + http_wait(0, ms);
+}
+
+// CHECK: within-off.fm:9:5: error: 'within' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: within-off.fm:11:17: error: use of undeclared identifier 'missing'
+// CHECK: within-off.fm:13:16: error: 'http_wait' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)

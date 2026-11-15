@@ -10,6 +10,14 @@ of the language; and all four of handles and lifetimes, routing, data in and out
 under `src/`, `include/`, `tools/` or `cmake/` changed for this note. §12 says what was measured, what was read at its
 source, and what was neither.*
 
+*Built since (2026-11-13), in the five steps of §10: [extending.md](../../extending.md)'s recipes 44 to 51, with
+[web.md](../../web.md) and [files.md](../../files.md) as the manual of what a program can now write. This note is
+left as it was written: it says "proposed" of what is now the language, and where the two differ, the manual is
+right. What the building added or found: `json_slice` and `http_reply_json`; a JSON literal needs `FMINUS_JSON`; a
+`within` block that the loop budget or a bounds check stops leaves no deadline behind; and the new keywords broke six
+programs of the tree (five for `serve`, one for `within`), not §2's three. What this note would not build (§0) and
+what it put off (an address built whole at run time) are not built.*
+
 ## 0. Summary
 
 **What I would build**, in this order:

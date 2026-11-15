@@ -37,9 +37,16 @@
 //     ret float 0.000000e+00
 //
 // So a stopped call returns to its host through every function between, each returning 0, null or nothing, and none
-// going on with a value that was never computed. A callee that always failed a check was noreturn to the optimiser,
-// which left `unreachable` after its calls: the record is always set when such a callee returns, so the read after the
-// call always unwinds. A function marked kBoundsCheckAttribute was changed by an earlier run of the pass: it may stop,
+// going on with a value that was never computed. In a function that begins a within block's deadline scope, the stop
+// block and the unwind block first abandon the thread's scopes (opt/EarlyReturn.h, returnEarly):
+//
+//   bounds.unwind:
+//     %web.context = load ptr, ptr @fminus_web_context, align 8
+//     %within.abandoned = call i32 @fminus_web_http_within_abandon(ptr %web.context)
+//     ret float 0.000000e+00
+//
+// A callee that always failed a check was noreturn to the optimiser, which left `unreachable` after its calls: the
+// record is always set when such a callee returns, so the read after the call always unwinds. A function marked kBoundsCheckAttribute was changed by an earlier run of the pass: it may stop,
 // and is left as it is. An indirect call is not followed (opt/EarlyReturn.h, reachedFunctions).
 //
 // Until this pass, a check costs what clang's -fsanitize-trap costs: a compare and a branch, and a loop with an exit

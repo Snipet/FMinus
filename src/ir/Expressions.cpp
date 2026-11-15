@@ -21,10 +21,13 @@ namespace fminus::ir::detail
     // `expr` lowered, failed when it or a part of it reported an error (Value: what takes it then says nothing more).
     // Its arithmetic's floating constants are doubles when the arithmetic has a double (lowerAs): what the arithmetic
     // around it says (doubleArithmetic_, for this call only), or, at the top of its arithmetic, what hasDouble finds.
+    // A string literal is a string when one is wanted (stringWanted_, for this call only: lowerAs), and so is each arm
+    // of a ?: then.
     Lowering::Value Lowering::lower(const ast::Expr& expr)
     {
         const std::size_t reported = diagnostics_.errors().size();
         const std::optional<bool> given = std::exchange(doubleArithmetic_, std::nullopt);
+        const bool text = std::exchange(stringWanted_, false);
         const auto wide = [&] { return given ? *given : hasDouble(expr); };
         Value value = std::visit(
             Overloaded{
@@ -100,6 +103,9 @@ namespace fminus::ir::detail
                     return poison(ast::Type::Float);
                 },
                 [&](const ast::BinaryExpr& operation) {
+                    // A string literal beside a string is one, compared with == or != (Text.cpp).
+                    if (isString(*operation.lhs) || isString(*operation.rhs))
+                        return lowerLiteralOperand(expr.location, operation);
                     // + - * / % pass their arithmetic's on; a comparison's two sides are one arithmetic of their own
                     // (d < 0.1 compares with C's 0.1); a bitwise operator's are each their own.
                     if (isComparison(operation.op) || isArithmetic(operation.op))
@@ -119,7 +125,7 @@ namespace fminus::ir::detail
                     return Value{lowerLogical(expr.location, logical), ast::Type::Bool};
                 },
                 [&](const ast::ConditionalExpr& conditional) {
-                    return lowerConditional(expr.location, conditional, wide());
+                    return lowerConditional(expr.location, conditional, wide(), text);
                 },
                 [&](const ast::ConstructExpr& construct) { return lowerConstruct(expr.location, construct); },
                 [&](const ast::MemberExpr& member) {
@@ -132,7 +138,14 @@ namespace fminus::ir::detail
                 [&](const ast::IncrementExpr& increment) { return lowerIncrement(expr.location, increment); },
                 [&](const ast::CastExpr& cast) { return lowerCast(expr.location, cast); },
                 [&](const ast::SizeofExpr& size) { return lowerSizeof(expr.location, size); },
-                [&](const ast::StringExpr&) { return notAValue(expr); },   // a builtin's argument only (Strings.cpp)
+                [&](const ast::StringExpr& literal) {   // a string where one is wanted, else a builtin's argument only
+                    return text ? stringValue(literal) : notAValue(expr);   // (Text.cpp, Strings.cpp)
+                },
+                [&](const ast::JsonExpr&) {   // a sink's argument only (Calls.cpp, Shapes.cpp)
+                    error(expr.location, "FMinus has no JSON values: a JSON literal is only the body of a reply, "
+                                         "http_reply_json, http_post, file_write or file_append");
+                    return recovery(ast::Type::Float);
+                },
             },
             expr.node);
         value.failed = value.failed || diagnostics_.errors().size() != reported;
@@ -148,10 +161,13 @@ namespace fminus::ir::detail
     // in it without a suffix is the double nearest its spelling, and the arithmetic computes as C's does, every step of
     // it the same: `double t = x * 0.1;` is C's double product, and `double third = 1.0 / 3.0;` C's third, not a float's
     // widened. An arithmetic with no double computes as it always did: a program without doubles means the same, bit
-    // for bit. lower(expr) is lowerAs(expr, void): its arithmetic has a double only when hasDouble finds one.
+    // for bit. lower(expr) is lowerAs(expr, void): its arithmetic has a double only when hasDouble finds one. Wanted as
+    // a string, a string literal is one (lower).
     Lowering::Value Lowering::lowerAs(const ast::Expr& expr, ast::Type type)
     {
-        return lowerWith(expr, type == ast::Type::Double || hasDouble(expr));
+        const bool doubles = type == ast::Type::Double || hasDouble(expr);
+        stringWanted_ = type == ast::Type::String;
+        return lowerWith(expr, doubles);
     }
 
     // `expr`, a part of an arithmetic whose floating constants are doubles or not: `doubles`, which the next lower()
@@ -306,6 +322,8 @@ namespace fminus::ir::detail
     {
         if (lhs.failed || rhs.failed)
             return recovery(recovered(op, lhs, rhs));
+        if (lhs.type == ast::Type::String || rhs.type == ast::Type::String)
+            return stringOperands(location, op, lhs, rhs);   // == and != only (Text.cpp)
         if (isBitwise(op) && (ast::arithmeticOf(lhs.type) != ast::Type::Int
                               || ast::arithmeticOf(rhs.type) != ast::Type::Int))
         {
@@ -313,6 +331,8 @@ namespace fminus::ir::detail
                                 + quoted(ast::typeName(rhs.type)) + ")");
             return poison(ast::Type::Int);
         }
+        if (ast::isHandle(lhs.type) || ast::isHandle(rhs.type))
+            return handleOperands(location, op, lhs, rhs);      // Memory.cpp
         if (ast::isPointer(lhs.type) || ast::isPointer(rhs.type))
             return pointerArithmetic(location, op, lhs, rhs);   // Memory.cpp
         ast::Type type = ast::Type::Float;
@@ -335,7 +355,7 @@ namespace fminus::ir::detail
         if (isComparison(op))
             return other != nullptr && ast::isVector(other->type) ? ast::maskOf(ast::arithmeticOf(other->type))
                                                                   : ast::Type::Bool;
-        if (other != nullptr && ast::isPointer(other->type))
+        if (other != nullptr && (ast::isPointer(other->type) || ast::isHandle(other->type)))
             return other->type;
         if (other != nullptr && ast::isArithmetic(other->type))
             return ast::arithmeticOf(other->type);
@@ -461,9 +481,9 @@ namespace fminus::ir::detail
     // c ? a : b, as clang lowers it: only the branch taken runs, so it takes blocks and a phi (a select would
     // run both). SimplifyCFG turns a small one without side effects into a select at -O1 and above. Its arms are part
     // of the arithmetic around it, whose floating constants are doubles or not (`doubles`, lowerAs); its condition is
-    // an arithmetic of its own.
+    // an arithmetic of its own. When a string is wanted (`text`), it is wanted of each arm: `c ? "on" : "off"`.
     Lowering::Value Lowering::lowerConditional(SourceLocation location, const ast::ConditionalExpr& conditional,
-                                               bool doubles)
+                                               bool doubles, bool text)
     {
         const Value test = lower(*conditional.condition);
         if (ast::isVector(test.type))
@@ -479,9 +499,11 @@ namespace fminus::ir::detail
         // Each branch may end in another block than it started in (a nested ?:): the phi needs the last. Both
         // are lowered before their type is known, then converted to it at their ends.
         builder_.SetInsertPoint(trueBlock);
+        stringWanted_ = text;
         const Value thenValue = lowerWith(*conditional.thenValue, doubles);
         llvm::BasicBlock* thenEnd = builder_.GetInsertBlock();
         builder_.SetInsertPoint(falseBlock);
+        stringWanted_ = text;
         const Value elseValue = lowerWith(*conditional.elseValue, doubles);
         llvm::BasicBlock* elseEnd = builder_.GetInsertBlock();
         if (thenValue.failed || elseValue.failed)
@@ -513,13 +535,25 @@ namespace fminus::ir::detail
             builder_.SetInsertPoint(endBlock);
             return poison(ast::isModule(thenValue.type) ? thenValue.type : elseValue.type);   // its fields still read
         }
-        const bool pointers = ast::isPointer(thenValue.type) || ast::isPointer(elseValue.type);
+        const bool pointers = ast::isPointer(thenValue.type) || ast::isPointer(elseValue.type)
+                              || ast::isHandle(thenValue.type) || ast::isHandle(elseValue.type);
         ast::Type type = thenValue.type;
         bool meet = thenValue.type == elseValue.type;
         if (thenVoid != elseVoid)
             error(location, std::string(thenVoid ? "left" : "right") + " operand to ? is void, but "
                                 + (thenVoid ? "right" : "left") + " operand is of type "
                                 + quoted(ast::typeName(thenVoid ? elseValue.type : thenValue.type)));
+        else if (pointers && !meet && (ast::isHandle(thenValue.type) || ast::isHandle(elseValue.type)))
+        {
+            // A handle and a void*, which the handle converts to (C's); const if the void* is.
+            const Value& other = ast::isHandle(thenValue.type) ? elseValue : thenValue;
+            meet = ast::isPointer(other.type) && other.type.pointee == ast::Kind::Void;
+            if (meet)
+                type = other.type;
+            else
+                error(location, "incompatible operand types (" + quoted(ast::typeName(thenValue.type)) + " and "
+                                    + quoted(ast::typeName(elseValue.type)) + ")");
+        }
         else if (pointers && !meet)
         {
             // Two pointers to one type, or one a void*, which the other converts to (C's); const if either is.
@@ -538,7 +572,7 @@ namespace fminus::ir::detail
             meet = commonType(location, thenValue.type, elseValue.type, type);
         if (!meet)
             type = ast::Type::Float;
-        if (!ast::isPointer(type))
+        if (!ast::isPointer(type) && !ast::isHandle(type))
             type.enumeration = 0;   // two of an enumerated type give its integer type, as C's conversions do
         builder_.SetInsertPoint(thenEnd);
         llvm::Value* thenIR = meet ? convert(thenValue, type, location, Use::Initializing) : poison(type).ir;
@@ -645,7 +679,8 @@ namespace fminus::ir::detail
         const std::size_t reported = diagnostics_.errors().size();
         if (ast::isArray(type))
             type = sized(location, "", type, size.size.get(), size.rowSize.get(), nullptr);
-        if (diagnostics_.errors().size() != reported || !checkType(location, type))
+        // sizeof(char) is 1, though no variable is a char
+        if (diagnostics_.errors().size() != reported || (type != ast::Type::Char && !checkType(location, type)))
             return poison(ast::Type::Int);
         const ast::Type module = ast::isArray(type) ? ast::elementOf(type) : type;
         if (ast::isModule(module) && structs_.at(module.module)->isOpaque())   // in its own fields' sizes

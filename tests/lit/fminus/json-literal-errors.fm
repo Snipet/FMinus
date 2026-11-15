@@ -1,0 +1,35 @@
+// A JSON literal's errors (Shapes.cpp, Calls.cpp), each once, at its column: a value a literal does not write (a
+// pointer, a handle, an array of handles), a module with a parameter anywhere but *this in a method of its own,
+// json_slice's arguments, json_slice anywhere but in a literal, a literal where a sink takes none, and one nested
+// where no value is (json (value) is one value, and a literal is no value).
+// REQUIRES: json, files-write
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error: --implicit-check-not=note:
+
+module Voice
+{
+    param float pitch;
+    float level;
+    int save() { return file_write("out/voice.json", json { "voice": *this, "level": level }); }
+};
+
+int f(float* p, file_content c, Voice* v, int n)
+{
+    file_listing all[2];
+    char text[4];
+    float a[3];
+    json_slice(a, 1);
+    return file_write("out/a.json", json { "p": p, "c": c, "all": all, "v": *v })
+           + file_write("out/b.json", json [json_slice(text, 1), json_slice(a)])
+           + file_append("out/c.json", json (json (n))) + file_write("out/d.json", n, json [n]);
+}
+
+// CHECK: json-literal-errors.fm:20:5: error: 'json_slice' is a JSON literal's value, the first elements of an array written there, and nothing anywhere else
+// CHECK: json-literal-errors.fm:21:49: error: a JSON literal does not write a pointer, 'float *': write what it points to, *p, or its first elements, json_slice(p, count)
+// CHECK: json-literal-errors.fm:21:57: error: a JSON literal's value is a float, a double, an int, a bool, a string, an enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of them, not 'file_content'
+// CHECK: json-literal-errors.fm:21:67: error: a JSON literal's value is a float, a double, an int, a bool, a string, an enumeration's value, a float2, float4 or float8, an array or a module, or an object or an array of them, not 'file_listing[2]'
+// CHECK: json-literal-errors.fm:21:77: error: a JSON literal writes a parameter's value only where a method of its module reads it, as *this: 'pitch' of 'Voice' is one (leave it out with {{\[\[}}json::skip{{\]\]}})
+// CHECK: json-literal-errors.fm:22:56: error: 'json_slice' writes elements a JSON literal writes, and a char is none: a char array is a string, written whole
+// CHECK: json-literal-errors.fm:22:66: error: too few arguments to function call, expected 2, have 1
+// CHECK: json-literal-errors.fm:23:46: error: FMinus has no JSON values: a JSON literal is only the body of a reply, http_reply_json, http_post, file_write or file_append
+// CHECK: json-literal-errors.fm:23:59: error: passing 'int' to parameter of incompatible type 'const void *'
+// CHECK: json-literal-errors.fm:23:87: error: FMinus has no JSON values: a JSON literal is only the body of a reply, http_reply_json, http_post, file_write or file_append

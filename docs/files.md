@@ -20,21 +20,21 @@ module Kit
 
     int load()                                               // the host calls it off the audio thread
     {
-        void* kit = file_list("kit/*.f32");                  // a snapshot of the folder "kit", in its names' order
+        file_listing kit = file_list("kit/*.f32");           // a snapshot of the folder "kit", in its names' order
+        defer file_close(kit);                               // when load returns
         const int status = file_status(kit);                 // FILE_REFUSED unless the host granted "kit"
         count = 0;
         for (int i = 0; i < file_count(kit) && count < 8; ++i)
         {
-            void* f = file_read_nth(kit, i);                 // read whole into memory: refused in a nonblocking function
+            file_content f = file_read_nth(kit, i);          // read whole into memory: refused in a nonblocking function
+            defer file_close(f);                             // at the end of each iteration
             if (file_status(f) == FILE_OK)
             {
                 const int n = bytes_floats(file_data(f), file_size(f), sample[count], 12000);
                 length[count] = n < 12000 ? n : 12000;
                 count += 1;
             }
-            file_close(f);
         }
-        file_close(kit);
         return status == FILE_OK ? count : status;
     }
 };
@@ -100,20 +100,26 @@ them.
 
 | Builtin | Does | Effect |
 |---|---|---|
-| `void* file_read("name", ...)` | opens the file under the host's policy, reads all of it into memory, closes it, and gives a handle | allocates |
+| `file_content file_read("name", ...)` | opens the file under the host's policy, reads all of it into memory, closes it, and gives a handle | allocates |
 | `int file_status(h)` | `FILE_OK`, or why not ([below](#the-status-codes)), of a file or a listing | wait-free |
 | `int file_size(f)`, `const void* file_data(f)` | the bytes read and their address, until `file_close`; one 0 byte follows the last, not counted. 0 and null for a file that was not read | wait-free |
-| `void* file_list("folder/*.ext", ...)` | the regular files of one directory whose names fit the pattern, in the order of their names' bytes, as of now ([listings](#listings)) | allocates |
+| `file_listing file_list("folder/*.ext", ...)` | the regular files of one directory whose names fit the pattern, in the order of their names' bytes, as of now ([listings](#listings)) | allocates |
 | `int file_count(list)` | how many | wait-free |
-| `void* file_read_nth(list, i)` | reads the `i`-th (from 0), as `file_read` does | allocates |
+| `string file_name(list, i)` | the `i`-th file's own name (from 0), without its folder (`"pad1.f32"`), a view valid until the listing's `file_close`; empty outside 0 to `file_count - 1`, and for a listing not made | wait-free |
+| `file_content file_read_nth(list, i)` | reads the `i`-th (from 0), as `file_read` does | allocates |
 | `void file_close(h)` | frees a file's bytes, or a listing | allocates |
 | `int file_write("name", data, bytes, ...)` | writes `bytes` bytes at `data` as the whole file, replacing it in one step or not at all ([writing](#writing)); `FMINUS_FILES_WRITE` | allocates |
 | `int file_append("name", data, bytes, ...)` | adds them at the file's end, creating it if need be; `FMINUS_FILES_WRITE` | allocates |
+| `int file_write("name", json ..., ...)`, `int file_append("name", json ..., ...)` | the same, of a JSON literal's text ([below](#a-json-literal-as-a-file)); `file_append` adds a newline after it (JSON Lines); `FMINUS_FILES_WRITE` and `FMINUS_JSON` | allocates |
 
 - **A name is a string literal**, a format whose `%d`s are the `int`s after every other argument, as a URL's are
   (`file_write("takes/take%d.f32", data, bytes, n)`), checked where it is written ([below](#names-and-what-the-compiler-refuses))
   and recorded for the host: `Program::files()` lists every call, before anything runs.
-- **A handle is an opaque `void*` that knows its kind**: a file, or a listing. `file_read`, `file_list` and
+- **Or it names its values in holes** ([below](#holes)), `file_read("presets/{name}.json")`: each `{name}` a variable
+  in scope, an `int`, a `bool`, an enumeration's value or a `string`; the host's list has a `*` for each.
+- **A handle is opaque, and knows its kind**: a file, a `file_content`, or a listing, a `file_listing`, C's handles,
+  which the compiler keeps apart (`file_count(f)` of a file is an error) while a `void*` converts to either, as in C,
+  so a program that says `void*` compiles as before ([extending.md](extending.md), recipe 44). `file_read`, `file_list` and
   `file_read_nth` never return null: a file that could not be read, or a folder that could not be listed, is a handle
   too, one the runtime shares among every failure of its kind and status, which says why (`file_status`), has size 0,
   data null and count 0, and which `file_close` leaves alone. Even when memory runs out the answer is such a handle
@@ -122,15 +128,21 @@ them.
   until then its status is `FILE_INVALID`, its size, data and count 0 and null, and closing it again does nothing,
   whatever allocator the host has. Afterwards it is that next handle, as a closed file descriptor's number is a later
   file's: a program that uses a handle after closing it has a bug these rules only keep from being a crash.
-- **A wrong handle reads as no file.** A null handle, or one of the other kind (`file_size` of a listing, `file_count`
-  of a file), gives `FILE_INVALID`, 0 or null. `file_read_nth` with an index outside 0 to `file_count - 1`, or of
+- **A wrong handle reads as no file.** A null handle, or one of the other kind that reached the builtin as a `void*`
+  (`file_size` of a listing, `file_count` of a file), gives `FILE_INVALID`, 0 or null. `file_read_nth` with an index outside 0 to `file_count - 1`, or of
   something that is not a listing, gives a handle whose status is `FILE_INVALID`. `file_close` of null does nothing.
 - **What was read is in memory**, all of it, before the handle is returned: allocated and read into, never mapped. A
   handle's fields never change once it is returned, so the reads are plain loads, and a table may be read straight
   from `file_data` on the audio thread for as long as the handle is open ([the audio thread](#the-audio-thread)).
 - **Bytes, not text.** `bytes_floats` and `bytes_pcm16` turn a file's bytes into numbers, and `json_parse` and
-  `xml_parse` parse them ([README](../README.md), the builtins); FMinus has no strings, and no builtin gives a program a
-  file's name.
+  `xml_parse` parse them ([README](../README.md), the builtins), and `string_of(file_data(f), file_size(f))` views them
+  as text, a `string` valid until `file_close`.
+- **A listing gives its files' names**, `file_name(list, i)`, each the entry's own as the listing holds it (only a name
+  a program could have written: [listings](#listings)), valid until the listing is closed. What a name is then good
+  for: comparing (`==`, `string_ends`), keeping (`string_copy` into a `char` array), a JSON literal or a reply, and **a
+  hole of a later name**, `file_read("kit/{name}")` no (the literal writes its extension), but
+  `file_read("kit/{stem}.f32")` with `stem` the name without its extension (`string_slice`), where the run-time
+  checks of a string's hole apply as to any string's ([holes](#holes)).
 - **The effects** ([extending.md](extending.md), recipe 11): every builtin that touches the disk is in the class that
   allocates, refused in a `[[clang::nonblocking]]` function and in a `[[clang::nonallocating]]` one, directly or
   through a function it calls (with clang's note naming the call); the four reads are wait-free, allowed in both.
@@ -200,6 +212,28 @@ setting at run time.
 | with it | `file_write("/tmp/a.f32", ...)` | `a file is written only in a folder its host grants for writing, never by an absolute name` |
 | without `FMINUS_FILES_WRITE` | `file_write(...)`, `file_append(...)` | `'file_write' needs file writing, which this build of FMinus leaves out (FMINUS_FILES_WRITE=OFF)` |
 
+### Holes
+
+A name may name its values where they go instead of `%d`s after it: `file_write("presets/{name}.json", data, bytes)`,
+`file_list("kit/{bank}/*.f32")`. A hole is `{identifier}`, a variable in scope where the call is (a local, a parameter,
+a field, a constant), of type `int`, `bool` or an enumerated type (written in decimal, as `%d` is) or `string`; not an
+expression. A literal has `%d`s or holes, not both, and a literal with holes takes no ints after it. `{{` and `}}` are a
+brace, `%%` a percent sign.
+
+- **No hole in the folder** (the first segment, or an absolute name's root) **nor in the extension**, which the
+  literal writes: the folder is what the host mapped, the extension the file's type.
+- **A `string` joins the segment it is written in**, and cannot add one: the name filled in is checked when it runs by
+  the rules the compiler applies to a literal's segments: no `/`, `\` or `*` from the string, no leading `.` or space,
+  no trailing `.` or space, none of `: ? " < > |` or a control character, no device name of Windows, UTF-8, 255 bytes a
+  segment, 1024 a name, 16 segments. A name that breaks one is **`FILE_INVALID`**, a status the program reads, never a
+  trap, and nothing is opened. Then `reach` opens it exactly as any name (the policy's refusals `FILE_REFUSED`).
+- **The host's list** (`Program::files()`) has a `*` for each hole, as for each `%d`: `"presets/*.json"`.
+
+Each mistake is an error at its byte, as a literal's are: a brace alone, an empty hole, a name that is none, a hole of
+another type (`hole {x} has type 'float': a hole takes an int, a bool, an enumeration's value or a string`), `a file's
+folder is its literal's own, a name its host maps: no hole in it`, `a file's extension is its type, which the literal
+writes: no hole in it`, a `%d` beside a hole, values after a literal with holes.
+
 The target is the program's (`Options::targetTriple`, or the process's): a name that begins with a drive letter is
 judged a Windows name only when the program is compiled for Windows. A name with no `/` at all, such as `"C:\\x"`, gets
 the first row's message.
@@ -239,7 +273,8 @@ regard to ASCII letter case, so `*.wav` finds `KICK.WAV` on every system, not on
 - **In the order of the names' bytes**, FMinus's own (operating systems promise none): `CLAP.F32` before `hat.f32`.
 - **Only what a program could have read.** A listing holds regular files whose names the rules allow (no hidden file,
   no device name, nothing with a `:`), of a type allowed in that folder, and, under `singleLink`, with one link. Links,
-  directories, FIFOs and anything else are skipped, never listed. A program never sees a name: only an index.
+  directories, FIFOs and anything else are skipped, never listed. A program reads a name by its index, `file_name`, a
+  view of the listing's own copy.
 - **All or nothing.** More matching files than the policy's `maxListed` is `FILE_LIMIT`, and no listing at all, not
   the first `maxListed`. A listing counts as one of `maxOpen`'s handles.
 
@@ -277,6 +312,29 @@ absolute one):
   file. Neither is ever given back, for the life of the program's context (its `Program`, or an executable's run). A
   write refused before the walk, or over `maxFileBytes`, counts nothing.
 
+### A JSON literal as a file
+
+```c
+module Day { int sensor; float mean; float peak; };
+
+Day day[8];
+file_write("out/summary.json", json { "days": day });          // {"days":[{"sensor":0,"mean":0.25,"peak":1},...]}
+file_write("presets/{name}.json", json (preset));               // a module: an object of its fields
+file_append("log/days.jsonl", json { "day": k, "mean": mean });  // one line of JSON Lines, a newline after it
+```
+
+`file_write` and `file_append` take a JSON literal in place of their `data` and `bytes`
+([web.md](web.md), "The JSON literal", says what a literal holds and how each value is written): the name as any (with
+`%d`s after the literal, or holes), and the file's bytes the literal's text, **and, for `file_append`, one newline
+after it**, so that appends make JSON Lines (<https://jsonlines.org>: a file a line a value). The text is measured
+first (a pass of the runtime's writer that writes nothing), and its size meets every check `bytes` meets, in the same
+order: over `maxFileBytes` (the newline counted) is `FILE_LIMIT`, and the quotas count it as they count bytes. Only
+then is it written, once, into a buffer of exactly its size, which the file is written from as `data` is: the values
+are evaluated once, before either pass. The statuses are the plain form's. It needs the JSON writer too: in a build
+without `FMINUS_JSON` the literal is that option's error, and in one without `FMINUS_FILES_WRITE` the call is this
+one's. The runtime's functions are `fminus_rt_file_write_json` and `fminus_rt_file_append_json` (`Runtime.h`), which
+take the name's strings, none or some, the literal's description and its values' slots.
+
 ## The audio thread
 
 Opening, reading, writing and closing a file each wait on the disk for a time no one can bound, and the authorities
@@ -295,9 +353,9 @@ the research quotes say the same in the same words: never on the thread that ren
   built ([below](#what-is-not-built)).
 - **The reads are proved wait-free**, not asserted: `HeapCalls` counts no heap call in `file_status`, `file_size`,
   `file_data` and `file_count` (on a file, a listing, a failure and null), and a child process under seccomp's strict
-  mode, in which any system call but `read`, `write` and `exit` kills it, makes the same calls and exits with the
+  mode, in which any system call but `read`, `write` and `exit` kills it, makes the same calls and sends back the
   expected sums: in the runtime's code (`tests/unit/FilesTest.cpp`) and through a `[[clang::nonblocking]]` function the
-  JIT compiled (`tests/unit/FileBuiltinsTest.cpp`), on Linux.
+  JIT compiled (`tests/unit/FileBuiltinsTest.cpp`), on Linux ([testing.md](testing.md), "A wait-free proof").
 - **LLVM is told so.** A handle's four reads are declared `readonly`, `nofree` and `nosync` (unlike the web library's,
   which another thread changes): two reads of one handle with nothing between are merged, and a `file_read` between
   them is a write to the context's memory, so the read is repeated ([extending.md](extending.md), recipe 43).
@@ -573,7 +631,8 @@ Recipe 43 in [extending.md](extending.md) walks through it as a change to the co
 - **Outside the tree**, by hand, as the web library's were: the runtime's sources and `FilesTest.cpp` under GCC 13's
   AddressSanitizer with UndefinedBehaviorSanitizer (all 28 cases: "All tests passed (1378 assertions in 28 test
   cases)") and ThreadSanitizer (26, without the seccomp case and the `FILE_DENIED` one, whose forked children cannot
-  run under ThreadSanitizer's background thread); a race harness that exchanged a folder's subdirectory and a file with
+  run under ThreadSanitizer's background thread; the seccomp case runs there since its helper ends that thread itself:
+  [testing.md](testing.md), "A wait-free proof"); a race harness that exchanged a folder's subdirectory and a file with
   links to outside (`renameat2` with `RENAME_EXCHANGE`) while three threads read, listed and read the listed files (40
   seconds under AddressSanitizer, 4.0 million swaps; 30 under ThreadSanitizer, 3.1 million), with no byte from
   outside returned; a second one that also exchanged a denied directory, one pinned and one made after the context,
@@ -584,6 +643,21 @@ Recipe 43 in [extending.md](extending.md) walks through it as a change to the co
   twice, clean under AddressSanitizer. `FilesWindows.cpp` and `Files.cpp`'s Windows lines were type-checked on Linux
   (`clang++ -fsyntax-only -D_WIN32`, with the build's warnings and `-Werror`) against stub headers written from the
   Windows SDK's declarations: that finds a wrong type or name, not a wrong behaviour.
+- **Holes and `file_name`** (2026-11-13): built and tested in the default tree and in one with the web library, its
+  server, writing and absolute names, not in one with `FMINUS_FILES=OFF` nor with `FMINUS_FILES_TYPES` set; the
+  runtime's half (`fminus_rt_file_read_s` and the rest, `fminus_rt_file_name`) ran under the sanitizers when it was
+  written; through the JIT, a name a string makes wrong is `FILE_INVALID` (`tests/unit/HoleTest.cpp`), and a
+  nonblocking function reading a listing's names allocates nothing and makes no system call
+  (`tests/unit/DocumentTextTest.cpp`). `examples/presets/` writes and reads its files by names with holes, in a
+  directory its check makes.
+- **A JSON literal as a file** (2026-11-13): built and tested in the default tree (whose build has no writing: the
+  option's error) and in one with the web library, its server, writing and absolute names, not in one without
+  `FMINUS_JSON` (whose errors are written and not run), nor with `FMINUS_FILES=OFF` or `FMINUS_FILES_TYPES` set.
+  `fminus_rt_file_write_json` and `_append_json` from C++ (`tests/unit/JsonFileTest.cpp`: the text, JSON Lines, the
+  size limit with the newline, the quota, the refusals, a description the writer refuses), and through the JIT every
+  kind of value written and read back (`tests/unit/JsonLiteralTest.cpp`), as an executable (`json-literal.fm`); the
+  runtime's sources and those tests under GCC 13's AddressSanitizer with UndefinedBehaviorSanitizer and under
+  ThreadSanitizer ([extending.md](extending.md), recipe 51). `examples/presets/` stores each preset as `json (preset)`.
 - **Not run anywhere yet:** macOS (the `O_RDONLY` walk, `O_NOFOLLOW_ANY`, `F_BARRIERFSYNC`, `EMLINK`'s meaning,
   `fstatfs`'s type names, the tests' non-Linux paths) and Windows (all of `FilesWindows.cpp`: `NtCreateFile` with and
   without `OBJ_DONT_REPARSE`, `FILE_ID_INFO`, ancestors by the final path, the long-name check, listing by

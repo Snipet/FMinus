@@ -1,0 +1,61 @@
+// Text from a document and a listing (src/ir/Calls.cpp's textResult; docs/files.md, README.md): json_string,
+// xml_string and file_name call the runtime's function with the address of an int of the frame, where it writes the
+// length of the bytes whose address it returns, and make the pair; json_string's and xml_string's fallback is chosen,
+// member by member, when the address is null. The functions are declared as reads (no allocation, no lock), writing
+// that int. Run, a document of a literal's bytes is read.
+// REQUIRES: json, xml, files
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s | FileCheck %s --check-prefix=OPT
+// RUN: fminus %s --run main 1 | FileCheck %s --check-prefix=RESULT
+
+int name(json_doc doc, int k) [[clang::nonblocking]]
+{
+    return string_size(json_string(doc, "/presets/%d/name", k, "none"));
+}
+
+int text(xml_doc doc) [[clang::nonblocking]]
+{
+    return string_size(xml_string(doc, "/preset/@name", ""));
+}
+
+int entry(file_listing list, int i) [[clang::nonblocking]]
+{
+    return string_size(file_name(list, i));
+}
+
+int main(int k)
+{
+    const string source = "{\"presets\": [{\"name\": \"warm\"}, {\"name\": \"bright pad\"}, {\"name\": 7}]}";
+    json_doc doc = json_parse(string_data(source), string_size(source));
+    defer json_free(doc);
+    const string markup = "<preset name=' saw '/>";
+    xml_doc x = xml_parse(string_data(markup), string_size(markup));
+    defer xml_free(x);
+    file_listing none;
+    return name(doc, k) * 1000 + name(doc, 2) * 100 + text(x) * 10 + entry(none, 0);
+}
+
+// CHECK-LABEL: define i32 @name(
+// CHECK:         %json_string.data = call ptr @fminus_rt_json_text(ptr %{{.*}}, ptr @.path, ptr %format.ints, i32 1, ptr %json_string.length)
+// CHECK-NEXT:    %json_string.size = load i32, ptr %json_string.length, align 4, !tbaa
+// CHECK-NEXT:    %json_string.none = icmp eq ptr %json_string.data, null
+// CHECK-NEXT:    %{{[0-9]+}} = select i1 %json_string.none, ptr @.str, ptr %json_string.data
+// CHECK-NEXT:    %{{[0-9]+}} = select i1 %json_string.none, i32 4, i32 %json_string.size
+// CHECK-LABEL: define i32 @text(
+// CHECK:         %xml_string.data = call ptr @fminus_rt_xml_text(ptr %{{.*}}, ptr @.xmlpath, ptr null, i32 0, ptr %xml_string.length)
+// CHECK-LABEL: define i32 @entry(
+// CHECK:         %file_name.data = call ptr @fminus_rt_file_name(ptr %{{.*}}, i32 %{{.*}}, ptr %file_name.length)
+// CHECK-NEXT:    %file_name.size = load i32, ptr %file_name.length, align 4, !tbaa
+// CHECK-NOT:     select
+// CHECK: declare ptr @fminus_rt_json_text(ptr readonly captures(none), ptr readonly captures(none), ptr readonly captures(none), i32, ptr writeonly captures(none)) [[READ:#[0-9]+]]
+// CHECK: declare ptr @fminus_rt_xml_text(ptr readonly captures(none), ptr readonly captures(none), ptr readonly captures(none), i32, ptr writeonly captures(none)) [[READ]]
+// CHECK: declare ptr @fminus_rt_file_name(ptr readonly captures(none), i32, ptr writeonly captures(none)) [[READ]]
+// CHECK: attributes [[READ]] = { nofree nosync nounwind willreturn memory(argmem: readwrite, inaccessiblemem: read) }
+
+// Optimised, the length is a load after the call, which LLVM keeps (the call writes it).
+// OPT-LABEL: define {{.*}}i32 @entry(
+// OPT:         call ptr @fminus_rt_file_name(
+// OPT:         load i32, ptr %file_name.length
+
+// "bright pad" (10) * 1000, 7 is no string: "none" (4) * 100, the attribute trimmed, "saw" (3) * 10, no listing: 0
+// RESULT: 10430

@@ -19,10 +19,20 @@
 //   under it when its last user goes; a context arriving meanwhile waits for the join and starts a new one.
 // - Every handle a program is given begins with its kind (Handle.h), and each C function here reads it first: a
 //   request made is a Request; a server and a request it received are Server.cpp's, whose functions these call.
+// - A deadline scope (fminus_web_http_within_begin) is a context's, under its mutex, with the thread that began it:
+//   a request records the id of the innermost one its starting thread had open there (under the mutex, as it joins
+//   the list), and a scope's end waits on the context's condition variable, as fminus_web_http_wait does, for those of
+//   its requests still in the list to end, then queues an Expire for each left (FMINUS_WEB_TIMEOUT), under the mutex
+//   as Context::stop queues its cancels, and waits for the I/O thread to have handled them. A thread that begins one
+//   has a record of the context's (State::Holder), which fminus_web_http_within_abandon reads and writes without the
+//   mutex, so that a call the loop budget or a bounds check stopped leaves its thread no scope without taking a lock:
+//   it moves the record's generation on, and every scope begun under an earlier one is abandoned from then on.
 // - With the server (FMINUS_WEB_SERVER), a context has at most one, made by its first fminus_web_http_listen under its
-//   mutex, attached to the I/O thread by a command (Serve) queued under that mutex, and detached by another (Unserve)
-//   when it is closed, the context stopped or destroyed (stopServer), before it is marked closed. The I/O thread turns
-//   its servers after libcurl's transfers, and waits on their sockets in the same curl_multi_poll (Server.h).
+//   mutex, and attached to the I/O thread by a command (Serve) queued under that mutex. It is closed (when the program
+//   closes it, or the context is stopped or destroyed: beginClosingServer and endClosingServer) by two more: a Drain,
+//   after which it is marked closed, and once the replies the program handed over have gone out (or kDrainTime has
+//   passed), an Unserve that detaches it. The I/O thread turns its servers after libcurl's transfers, and waits on
+//   their sockets in the same curl_multi_poll (Server.h).
 #include "web/Web.h"
 
 #include "fminus/Config.h"
@@ -79,6 +89,46 @@ namespace fminus::web
 
         CURLSH* share = nullptr;   // the I/O thread's
 
+        // A thread that has begun a scope here, and how many it has open: what fminus_web_http_within_abandon reads
+        // without the mutex. Made by a thread's first begin (under the mutex), and kept for the context's life: a
+        // record whose thread has none open is taken by the next thread that begins one, so there are never more than
+        // the most threads that had scopes open here at once. Only its thread writes `generation` and `open` (its
+        // begins and ends, under the mutex, and its abandon, without); `thread` is written under the mutex, by a begin
+        // that takes a record with none open.
+        struct Holder
+        {
+            std::atomic<std::thread::id> thread;
+            std::atomic<std::uint64_t> generation{1};   // a scope begun under another generation is abandoned
+            std::atomic<std::int32_t> open{0};          // the thread's scopes here of this generation
+            Holder* next = nullptr;                     // set before the record is published, never after
+        };
+        std::atomic<Holder*> holders{nullptr};   // pushed under the mutex, read by abandon without it
+
+        // The deadline scopes open (fminus_web_http_within_begin), every thread's, in the order they were begun, under
+        // the mutex. A thread's innermost is its last here that is not abandoned; a request it starts joins that one
+        // (Request::scope).
+        struct Scope
+        {
+            std::uint64_t id = 0;            // never 0, never reused
+            std::thread::id owner;           // the thread that began it, the only one that sees it
+            bool bounded = false;            // it has a deadline: its own, or an enclosing one's
+            Clock::time_point deadline;      // the earlier of its own and the enclosing scope's
+            Holder* holder = nullptr;        // its thread's record
+            std::uint64_t generation = 0;    // the record's when it began: abandoned once the record's is past it
+        };
+        std::vector<Scope> scopes;
+        std::uint64_t scopesBegun = 0;
+        bool destroying = false;   // ~Context has begun (under the mutex): a scope's end says so
+
+        State() = default;
+        State(const State&) = delete;
+        State& operator=(const State&) = delete;
+        ~State()
+        {
+            for (Holder* holder = holders.load(std::memory_order_relaxed); holder != nullptr;)
+                delete std::exchange(holder, holder->next);
+        }
+
 #if FMINUS_HAS_WEB_SERVER
         Server* server = nullptr;   // its first listen's, under the mutex; freed by ~Context
 #endif
@@ -101,6 +151,8 @@ namespace fminus::web
             std::int32_t size = 0;
 
             Context::State* context = nullptr;   // null: the shared refused request
+            std::uint64_t scope = 0;             // the deadline scope it joined (State::Scope::id), under the context's
+                                                 // mutex; 0: none
 
             // The I/O thread's while in flight.
             Target target;
@@ -151,10 +203,13 @@ namespace fminus::web
             {
                 Start,
                 Cancel,
+                Expire,   // a cancel by a deadline scope's end: the request ends as FMINUS_WEB_TIMEOUT
                 Forget,
 #if FMINUS_HAS_WEB_SERVER
                 Serve,     // the I/O thread starts driving `server`
-                Unserve,   // and stops: its sockets closed, its requests given up
+                Drain,     // begins closing it: stops listening, gives up what the program has not answered, and sends
+                           // the replies it has (Servers::drain)
+                Unserve,   // and stops driving it: its sockets closed, its requests given up
 #endif
             } kind;
             Request* request = nullptr;
@@ -419,6 +474,10 @@ namespace fminus::web
                 if (command.request->easy != nullptr)
                     finish(command.request, FMINUS_WEB_CANCELLED);
                 break;
+            case Command::Expire:
+                if (command.request->easy != nullptr)
+                    finish(command.request, FMINUS_WEB_TIMEOUT);
+                break;
             case Command::Forget:
                 if (command.context->share != nullptr)
                 {
@@ -429,6 +488,9 @@ namespace fminus::web
 #if FMINUS_HAS_WEB_SERVER
             case Command::Serve:
                 servers_.attach(command.server);
+                break;
+            case Command::Drain:
+                servers_.drain(command.server);
                 break;
             case Command::Unserve:
                 servers_.detach(command.server);
@@ -672,17 +734,113 @@ namespace fminus::web
             context.changed.notify_all();
         }
 
-        // A request under `context`, checked, and started unless the check or a limit ended it.
+        // Whether `scope` was abandoned (fminus_web_http_within_abandon): its thread's record has moved on to a later
+        // generation. Under the context's mutex; for another thread's scope, a stale read says it is not, which only
+        // keeps it in the list a little longer (no thread but its own sees it).
+        bool abandoned(const Context::State::Scope& scope)
+        {
+            return scope.holder->generation.load(std::memory_order_relaxed) != scope.generation;
+        }
+
+        // The calling thread's innermost deadline scope under the context, or null: its last begun that it has neither
+        // ended nor abandoned. Under the context's mutex; the pointer only until the mutex is let go (another thread's
+        // begin may move the scopes).
+        Context::State::Scope* innermost(Context::State& context)
+        {
+            const std::thread::id me = std::this_thread::get_id();
+            for (auto scope = context.scopes.rbegin(); scope != context.scopes.rend(); ++scope)
+            {
+                if (scope->owner == me && !abandoned(*scope))
+                    return &*scope;
+            }
+            return nullptr;
+        }
+
+        // Drops the abandoned scopes from the list, under the context's mutex (it allocates nothing).
+        void dropAbandoned(Context::State& context)
+        {
+            std::erase_if(context.scopes, [](const Context::State::Scope& scope) { return abandoned(scope); });
+        }
+
+        // The calling thread's record under the context, made or taken if it has none, or null when memory ran out.
+        // Under the context's mutex.
+        Context::State::Holder* holderOf(Context::State& context)
+        {
+            static_assert(std::atomic<std::thread::id>::is_always_lock_free,
+                          "fminus_web_http_within_abandon reads a record's thread without a lock");
+            const std::thread::id me = std::this_thread::get_id();
+            Context::State::Holder* free = nullptr;
+            for (Context::State::Holder* holder = context.holders.load(std::memory_order_relaxed); holder != nullptr;
+                 holder = holder->next)
+            {
+                if (holder->thread.load(std::memory_order_relaxed) == me)
+                    return holder;
+                // A record with none open is no thread's: its abandon, if one ran, stored `open` last, so its
+                // generation is the one a scope begun now must carry.
+                if (free == nullptr && holder->open.load(std::memory_order_acquire) == 0)
+                    free = holder;
+            }
+            if (free == nullptr)
+            {
+                free = new (std::nothrow) Context::State::Holder;
+                if (free == nullptr)
+                    return nullptr;
+                free->next = context.holders.load(std::memory_order_relaxed);
+                context.holders.store(free, std::memory_order_release);
+            }
+            free->thread.store(me, std::memory_order_release);
+            return free;
+        }
+
+        // A POST's body a JSON literal's writer makes (fminus_web_http_post_json): the writer, the literal's
+        // description and its values.
+        struct JsonBody
+        {
+            fminus_web_json_writer write;
+            const void* description;
+            const void* values;
+        };
+
+        // A request under `context`, checked, and started unless the check or a limit ended it; or, with a `refusal`
+        // (the URL's places could not be filled: expandUrl), ended with it before its URL is looked at. A POST's body
+        // is the `bytes` bytes at `data`, or with `json` the text its writer makes, measured first and then written
+        // into the request's own body.
         Request* start(Context::State* context, std::string url, bool post, const void* data, std::int32_t bytes,
-                       std::string_view type)
+                       std::string_view type, std::int32_t refusal = 0, const JsonBody* json = nullptr)
         {
             Request* request = new (std::nothrow) Request;
             if (request == nullptr)
                 return nullptr;
             request->context = context;
             const Policy& policy = context->policy.policy;
-            std::int32_t status = checkUrl(context->policy, url, request->target);
-            if (status == 0 && post)
+            std::int32_t status = refusal != 0 ? refusal : checkUrl(context->policy, url, request->target);
+            if (status == 0 && post && json != nullptr)
+            {
+                request->post = true;
+                const std::int32_t measured =
+                    json->write == nullptr ? -1 : json->write(nullptr, 0, json->description, json->values);
+                if (measured < 0)
+                    status = FMINUS_WEB_INVALID;
+                else if (measured > policy.maxBodyBytes)
+                    status = FMINUS_WEB_LIMIT;
+                else if (!validContentType(type))
+                    status = FMINUS_WEB_REFUSED;
+                else
+                {
+                    try
+                    {
+                        request->data.resize(static_cast<std::size_t>(measured));
+                        if (json->write(request->data.data(), measured, json->description, json->values) != measured)
+                            status = FMINUS_WEB_INVALID;   // the values changed between the two passes
+                        request->type = std::string(type);
+                    }
+                    catch (const std::bad_alloc&)
+                    {
+                        status = FMINUS_WEB_FAILED;
+                    }
+                }
+            }
+            else if (status == 0 && post)
             {
                 request->post = true;
                 if (bytes < 0 || (data == nullptr && bytes > 0))
@@ -724,6 +882,8 @@ namespace fminus::web
                     delete request;
                     return nullptr;
                 }
+                if (const Context::State::Scope* scope = innermost(*context))
+                    request->scope = scope->id;
                 if (status == 0 && context->inFlight >= policy.maxRequests)
                     status = FMINUS_WEB_LIMIT;
                 if (status == 0 && context->stopped.load(std::memory_order_relaxed))
@@ -761,11 +921,151 @@ namespace fminus::web
             return out;
         }
 
-        // Closes the context's server, if it has one: the I/O thread lets go of it (its sockets closed, its requests
-        // given up), then it is marked closed (its port FMINUS_WEB_CANCELLED, every thread in accept woken). Waits for
-        // the I/O thread: not under the context's mutex, which the I/O thread takes.
-        void stopServer([[maybe_unused]] Context::State& state)
+        // The URL a format with %d and %s places makes (runtime/Format.h), in `out`: each %s's text percent-encoded,
+        // every byte but A-Z, a-z, 0-9, "-", ".", "_" and "~" written %XX, so that a text never ends a part of the URL
+        // nor begins one. 0, or FMINUS_WEB_INVALID when a text is not one (a negative length, or a null address and
+        // bytes), when a %s is in the scheme or the authority (its host, its port: everything before the "://" the
+        // literal writes and up to the "/", "?" or "#" after it; with no "://" before it, a %s is in the scheme), or
+        // when a path segment a %s is written in is empty, "." or ".." once filled in. The parts are the literal's: a
+        // %d writes digits and a minus, and an encoded text none of ":/?#", so every delimiter is the literal's own.
+        // Only the first 8193 bytes are kept (one more than a URL may have, so checkUrl finds it too long) and the
+        // rest only looked at: a text of any length takes no more memory.
+        std::int32_t expandUrl(const char* format, std::int32_t length, const std::int32_t* ints, std::int32_t count,
+                               const char* const* texts, const std::int32_t* lengths, std::int32_t textCount,
+                               std::string& out)
         {
+            constexpr std::size_t kKept = 8192 + 1;
+            enum class Part
+            {
+                Scheme,
+                Authority,
+                Path,
+                Query,   // or the fragment: a text there is encoded and nothing more
+            };
+            Part part = Part::Scheme;
+            int slashes = 0;   // in the scheme: 1 after a ":", 2 after ":/"
+            // The path segment being written: its bytes, whether they are all "." (two at most), and whether a %s is
+            // in it.
+            std::size_t segment = 0;
+            bool dots = true;
+            bool hasText = false;
+            bool invalid = false;
+            const auto endSegment = [&]
+            {
+                if (hasText && (segment == 0 || (dots && segment <= 2)))
+                    invalid = true;
+                segment = 0;
+                dots = true;
+                hasText = false;
+            };
+            const auto put = [&](char c)
+            {
+                if (out.size() < kKept)
+                    out.push_back(c);
+            };
+            const auto literal = [&](char c)
+            {
+                put(c);
+                switch (part)
+                {
+                case Part::Scheme:
+                    if (c == ':')
+                        slashes = 1;
+                    else if (c == '/' && slashes > 0)
+                    {
+                        if (++slashes == 3)
+                            part = Part::Authority;
+                    }
+                    else
+                        slashes = 0;
+                    break;
+                case Part::Authority:
+                    if (c == '/')
+                        part = Part::Path;
+                    else if (c == '?' || c == '#')
+                        part = Part::Query;
+                    break;
+                case Part::Path:
+                    if (c == '/' || c == '?' || c == '#')
+                    {
+                        endSegment();
+                        if (c != '/')
+                            part = Part::Query;
+                    }
+                    else
+                    {
+                        dots = dots && c == '.';
+                        ++segment;
+                    }
+                    break;
+                case Part::Query:
+                    break;
+                }
+            };
+            const auto text = [&](const char* bytes, std::int32_t size)
+            {
+                static constexpr char kHex[] = "0123456789ABCDEF";
+                if (part == Part::Scheme || part == Part::Authority)
+                    invalid = true;
+                hasText = true;
+                for (std::int32_t i = 0; i < size; ++i)
+                {
+                    const char c = bytes[i];
+                    const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                                            c == '-' || c == '.' || c == '_' || c == '~';
+                    if (unreserved)
+                        put(c);
+                    else
+                    {
+                        put('%');
+                        put(kHex[static_cast<unsigned char>(c) >> 4]);
+                        put(kHex[static_cast<unsigned char>(c) & 15]);
+                    }
+                    if (part == Part::Path)
+                    {
+                        dots = dots && c == '.';
+                        segment += unreserved ? 1 : 3;
+                    }
+                    if (out.size() >= kKept && (part != Part::Path || !dots || segment > 2))
+                        break;   // too long already, and nothing more to tell of its segment
+                }
+            };
+            if (!runtime::expandPlaces(format, length, ints, count, texts, lengths, textCount, literal, text))
+                return FMINUS_WEB_INVALID;
+            if (part == Part::Path)
+                endSegment();
+            return invalid ? FMINUS_WEB_INVALID : 0;
+        }
+
+#if FMINUS_HAS_WEB_SERVER
+        // How long closing a server lets the I/O thread send the replies the program handed over before it (Web.h,
+        // fminus_web_http_close). Each is written into its socket as the close begins, so a client that reads has it at
+        // once: this bounds a client that does not read (or a network too slow for the reply), and so the host's own
+        // call, stopWeb() or ~Program or a loader's http_close, whose time is the host's to count on. A constant, not a
+        // policy's: no host knows its clients' speed to set it better.
+        constexpr auto kDrainTime = std::chrono::milliseconds(250);
+
+        // A server being closed, between beginClosingServer and endClosingServer: null when there is nothing to wait
+        // for.
+        struct Closing
+        {
+            Server* server = nullptr;
+            Clock::time_point until;
+        };
+#else
+        struct Closing
+        {
+        };
+#endif
+
+        // Closes the context's server, if it has one, in two halves, so that Context::stop and ~Context wake every
+        // thread waiting at once, and cancel their requests while the replies go out. The first: the I/O thread stops
+        // listening, gives up every request the program has not answered, and begins sending the replies it has
+        // (Command::Drain); then the server is marked closed (its port FMINUS_WEB_CANCELLED, every thread in accept
+        // woken). Waits for the I/O thread: not under the context's mutex, which the I/O thread takes.
+        Closing beginClosingServer([[maybe_unused]] Context::State& state)
+        {
+            Closing closing;
 #if FMINUS_HAS_WEB_SERVER
             Server* server = nullptr;
             bool usesEngine = false;
@@ -775,17 +1075,55 @@ namespace fminus::web
                 usesEngine = state.usesEngine;
             }
             if (server == nullptr)
-                return;
+                return closing;
             if (usesEngine)
             {
-                Command command{Command::Unserve, nullptr, &state, 0};
+                Command command{Command::Drain, nullptr, &state, 0};
                 command.server = server;
                 engine().wait(engine().postSurely(command));
+                closing.server = server;
+                closing.until = Clock::now() + kDrainTime;
             }
             closeServer(*server);
 #endif
+            return closing;
         }
+
+        // The second: waits until the replies have gone out, or kDrainTime has passed, then the I/O thread lets go of
+        // the server (Command::Unserve), closing whatever is left. Each close has its own two halves: two threads
+        // closing at once each wait for the same drain, and the second Unserve finds nothing.
+        void endClosingServer([[maybe_unused]] const Closing& closing)
+        {
+#if FMINUS_HAS_WEB_SERVER
+            if (closing.server == nullptr)
+                return;
+            waitDrained(*closing.server, closing.until);
+            Command command{Command::Unserve, nullptr, nullptr, 0};
+            command.server = closing.server;
+            engine().wait(engine().postSurely(command));
+#endif
+        }
+
+#if FMINUS_HAS_WEB_SERVER
+        // http_close's: its only caller, and a server's only in a build with one.
+        void stopServer(Context::State& state)
+        {
+            endClosingServer(beginClosingServer(state));
+        }
+#endif
     } // namespace
+
+#if FMINUS_HAS_WEB_SERVER
+    bool scopeDeadline(Context::State* context, Clock::time_point& deadline) noexcept
+    {
+        std::lock_guard lock(context->mutex);
+        const Context::State::Scope* scope = innermost(*context);
+        if (scope == nullptr || !scope->bounded)
+            return false;
+        deadline = scope->deadline;
+        return true;
+    }
+#endif
 
     std::string checkPolicy(const Policy& policy)
     {
@@ -817,7 +1155,11 @@ namespace fminus::web
     Context::~Context()
     {
         State& state = *state_;
-        stopServer(state);
+        {
+            std::lock_guard lock(state.mutex);
+            state.destroying = true;
+        }
+        const Closing closing = beginClosingServer(state);
         if (state.usesEngine)
         {
             // Cancels what is in flight; the Forget, handled after those, frees the share.
@@ -835,6 +1177,7 @@ namespace fminus::web
                 engine().postSurely({Command::Cancel, request, &state, 0});
             engine().wait(engine().postSurely({Command::Forget, nullptr, &state, 0}));
         }
+        endClosingServer(closing);   // before the I/O thread may be joined (release, below)
         {
             std::unique_lock lock(state.mutex);
             state.dying = true;
@@ -872,9 +1215,10 @@ namespace fminus::web
 
     // The flag first, under the mutex: a start that takes the mutex after it is cancelled there, one before it is in
     // the list, and its Start command, if it is queued after the cancels below, finds the flag as its hop begins. Then
-    // a cancel of each request still pending, one at a time, each waited for. Each is queued under the mutex, so that
-    // a thread closing that request meanwhile (close removes it under the mutex) queues its own cancel after it, and
-    // frees the request only once both have been handled.
+    // the server's first half of closing (every thread in accept woken), and a cancel of each request still pending,
+    // one at a time, each waited for. Each is queued under the mutex, so that a thread closing that request meanwhile
+    // (close removes it under the mutex) queues its own cancel after it, and frees the request only once both have been
+    // handled. Last, the server's second half: the replies the program handed over have gone out, or their time has.
     void Context::stop() noexcept
     {
         State& state = *state_;
@@ -884,10 +1228,8 @@ namespace fminus::web
             state.stopped.store(true, std::memory_order_release);
             usesEngine = state.usesEngine;
         }
-        stopServer(state);
-        if (!usesEngine)
-            return;
-        for (;;)
+        const Closing closing = beginClosingServer(state);
+        while (usesEngine)
         {
             std::uint64_t sequence = 0;
             {
@@ -902,9 +1244,10 @@ namespace fminus::web
                 }
             }
             if (sequence == 0)
-                return;
+                break;
             engine().wait(sequence);
         }
+        endClosingServer(closing);
     }
 
     void* Context::handle() noexcept
@@ -924,6 +1267,15 @@ namespace fminus::web
     bool ioThreadRunning()
     {
         return engine().running();
+    }
+
+    std::int32_t waitingThreads(void* context)
+    {
+        if (context == nullptr)
+            return 0;
+        Context::State& state = *static_cast<Context::State*>(context);
+        std::lock_guard lock(state.mutex);
+        return state.waiters;
     }
 } // namespace fminus::web
 
@@ -988,6 +1340,72 @@ extern "C"
         }
     }
 
+    void* fminus_web_http_get_s(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                std::int32_t textCount) noexcept
+    {
+        if (context == nullptr)
+            return madeHandle(&fminus::web::refused());
+        try
+        {
+            std::string filled;
+            const std::int32_t refusal =
+                fminus::web::expandUrl(url, length, ints, count, texts, lengths, textCount, filled);
+            return madeHandle(fminus::web::start(static_cast<Context::State*>(context), std::move(filled), false,
+                                                 nullptr, 0, {}, refusal));
+        }
+        catch (const std::bad_alloc&)
+        {
+            return nullptr;
+        }
+    }
+
+    void* fminus_web_http_post_s(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                 std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                 std::int32_t textCount, const void* data, std::int32_t bytes, const char* type,
+                                 std::int32_t typeLength) noexcept
+    {
+        if (context == nullptr)
+            return madeHandle(&fminus::web::refused());
+        try
+        {
+            const std::string_view contentType = type == nullptr || typeLength <= 0
+                                                     ? std::string_view()
+                                                     : std::string_view(type, static_cast<std::size_t>(typeLength));
+            std::string filled;
+            const std::int32_t refusal =
+                fminus::web::expandUrl(url, length, ints, count, texts, lengths, textCount, filled);
+            return madeHandle(fminus::web::start(static_cast<Context::State*>(context), std::move(filled), true, data,
+                                                 bytes, contentType, refusal));
+        }
+        catch (const std::bad_alloc&)
+        {
+            return nullptr;
+        }
+    }
+
+    void* fminus_web_http_post_json(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                    std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                    std::int32_t textCount, fminus_web_json_writer write, const void* description,
+                                    const void* values) noexcept
+    {
+        if (context == nullptr)
+            return madeHandle(&fminus::web::refused());
+        try
+        {
+            std::string filled;
+            const std::int32_t refusal =
+                fminus::web::expandUrl(url, length, ints, count, texts, lengths, textCount, filled);
+            const fminus::web::JsonBody body{write, description, values};
+            return madeHandle(fminus::web::start(static_cast<Context::State*>(context), std::move(filled), true, nullptr,
+                                                 0, "application/json", refusal, &body));
+        }
+        catch (const std::bad_alloc&)
+        {
+            return nullptr;
+        }
+    }
+
     std::int32_t fminus_web_http_wait(void* handle, std::int32_t timeoutMs) noexcept
     {
         fminus::web::Request* request = made(handle);
@@ -997,20 +1415,158 @@ extern "C"
         if (now != FMINUS_WEB_PENDING || timeoutMs == 0 || request->context == nullptr)
             return now;
         Context::State& context = *request->context;
+        const auto started = fminus::web::Clock::now();
         std::unique_lock lock(context.mutex);
         ++context.waiters;
         const auto ready = [&]
         {
             return context.dying || request->status.load(std::memory_order_acquire) != FMINUS_WEB_PENDING;
         };
-        if (timeoutMs < 0)
+        // The calling thread's innermost deadline scope bounds the wait as its own timeout does.
+        bool bounded = timeoutMs >= 0;
+        auto deadline =
+            bounded ? started + std::chrono::milliseconds(timeoutMs) : fminus::web::Clock::time_point::max();
+        if (const Context::State::Scope* scope = fminus::web::innermost(context); scope != nullptr && scope->bounded)
+        {
+            deadline = bounded ? std::min(deadline, scope->deadline) : scope->deadline;
+            bounded = true;
+        }
+        if (!bounded)
             context.changed.wait(lock, ready);
         else
-            context.changed.wait_for(lock, std::chrono::milliseconds(timeoutMs), ready);
+            context.changed.wait_until(lock, deadline, ready);
         const std::int32_t status = request->status.load(std::memory_order_acquire);
         if (--context.waiters == 0 && context.dying)
             context.changed.notify_all();
         return status;
+    }
+
+    std::int32_t fminus_web_http_within_begin(void* context, std::int32_t timeoutMs) noexcept
+    {
+        if (context == nullptr)
+            return 0;   // a program given no network: its requests are refused at once, and nothing waits
+        Context::State& state = *static_cast<Context::State*>(context);
+        const auto now = fminus::web::Clock::now();
+        std::lock_guard lock(state.mutex);
+        fminus::web::dropAbandoned(state);
+        Context::State::Holder* holder = fminus::web::holderOf(state);
+        if (holder == nullptr)
+            return FMINUS_WEB_FAILED;
+        Context::State::Scope scope;
+        scope.owner = std::this_thread::get_id();
+        scope.holder = holder;
+        scope.generation = holder->generation.load(std::memory_order_relaxed);
+        scope.bounded = timeoutMs >= 0;
+        if (scope.bounded)
+            scope.deadline = now + std::chrono::milliseconds(timeoutMs);
+        if (const Context::State::Scope* outer = fminus::web::innermost(state); outer != nullptr && outer->bounded)
+        {
+            if (!scope.bounded || outer->deadline < scope.deadline)
+                scope.deadline = outer->deadline;
+            scope.bounded = true;
+        }
+        scope.id = state.scopesBegun + 1;
+        try
+        {
+            state.scopes.push_back(scope);
+        }
+        catch (const std::bad_alloc&)
+        {
+            return FMINUS_WEB_FAILED;
+        }
+        state.scopesBegun = scope.id;
+        holder->open.store(holder->open.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        return 0;
+    }
+
+    // Counted among the context's waiters from its first look to its last (as fminus_web_http_wait is), so that
+    // ~Context waits for it, and wakes it. The scope is found again by its id after each wait: another thread's begin
+    // may have moved the scopes meanwhile. Each expiry is queued under the mutex, as Context::stop's cancels are, so a
+    // thread closing one of the requests meanwhile frees it only once the expiry has been handled.
+    std::int32_t fminus_web_http_within_end(void* context) noexcept
+    {
+        if (context == nullptr)
+            return 0;
+        Context::State& state = *static_cast<Context::State*>(context);
+        std::unique_lock lock(state.mutex);
+        const Context::State::Scope* found = fminus::web::innermost(state);
+        if (found == nullptr)
+            return FMINUS_WEB_INVALID;
+        const Context::State::Scope scope = *found;
+        const auto joined = [&](const fminus::web::Request* request)
+        {
+            return request->scope == scope.id &&
+                   request->status.load(std::memory_order_acquire) == FMINUS_WEB_PENDING;
+        };
+        const auto ready = [&]
+        {
+            return state.dying || std::none_of(state.requests.begin(), state.requests.end(), joined);
+        };
+        ++state.waiters;
+        if (scope.bounded)
+            state.changed.wait_until(lock, scope.deadline, ready);
+        else
+            state.changed.wait(lock, ready);
+        std::int32_t result = 0;
+        if (state.dying)
+            result = FMINUS_WEB_CANCELLED;   // its requests were cancelled; the scope goes with the context
+        else
+        {
+            std::uint64_t sequence = 0;
+            if (state.usesEngine)
+            {
+                for (fminus::web::Request* request : state.requests)
+                {
+                    if (joined(request))
+                        sequence = fminus::web::engine().postSurely(
+                            {fminus::web::Command::Expire, request, &state, 0});
+                }
+            }
+            std::erase_if(state.scopes, [&](const Context::State::Scope& open) { return open.id == scope.id; });
+            scope.holder->open.store(scope.holder->open.load(std::memory_order_relaxed) - 1,
+                                     std::memory_order_relaxed);
+            fminus::web::dropAbandoned(state);
+            if (sequence != 0)
+            {
+                result = FMINUS_WEB_TIMEOUT;
+                lock.unlock();
+                fminus::web::engine().wait(sequence);
+                lock.lock();
+            }
+            if (state.stopped.load(std::memory_order_acquire) || state.destroying)
+                result = FMINUS_WEB_CANCELLED;
+        }
+        if (--state.waiters == 0 && state.dying)
+            state.changed.notify_all();
+        return result;
+    }
+
+    // Without the mutex: a walk of the records (each published, with its `next`, before the list's head points to it,
+    // and never freed before the context) for the calling thread's, and, when it has scopes open, its generation moved
+    // on and its count stored 0, in that order: a begin that then takes the record, seeing 0, sees the new generation
+    // (holderOf). Only this thread writes either, so no store races another. The scopes stay in the list, abandoned
+    // (innermost skips them), until a begin or an end of any thread drops them under the mutex. Its steps are bounded
+    // by the records, at most the most threads that had scopes open here at once.
+    std::int32_t fminus_web_http_within_abandon(void* context) noexcept
+    {
+        if (context == nullptr)
+            return 0;
+        Context::State& state = *static_cast<Context::State*>(context);
+        const std::thread::id me = std::this_thread::get_id();
+        for (Context::State::Holder* holder = state.holders.load(std::memory_order_acquire); holder != nullptr;
+             holder = holder->next)
+        {
+            if (holder->thread.load(std::memory_order_relaxed) != me)
+                continue;
+            const std::int32_t open = holder->open.load(std::memory_order_relaxed);
+            if (open == 0)
+                return 0;
+            holder->generation.store(holder->generation.load(std::memory_order_relaxed) + 1,
+                                     std::memory_order_relaxed);
+            holder->open.store(0, std::memory_order_release);
+            return open;
+        }
+        return 0;
     }
 
     std::int32_t fminus_web_http_status(const void* handle) noexcept

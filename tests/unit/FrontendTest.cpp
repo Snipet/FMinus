@@ -163,6 +163,154 @@ TEST_CASE("switch parses as C's, and case and default as C23's labels: block ite
           == "test.fm:1:11: error: syntax error, unexpected default, expecting * or ) or , or identifier\n");
 }
 
+TEST_CASE("defer and _Defer parse as TS 25755's defer statement: a statement after the keyword", "[frontend]")
+{
+    CHECK(parsed("void f(int* p, int k)\n"
+                 "{\n"
+                 "    defer *p = 1;\n"
+                 "    _Defer { int x = k; defer *p += x; }\n"
+                 "    if (k) defer if (k > 1) *p = 2; else *p = 3;\n"
+                 "    for (;;) defer defer k++;\n"
+                 "    switch (k) { default: defer break; }\n"
+                 "}\n")
+          == "(function void f ((int * p) (int k))\n"
+             "  (defer\n"
+             "    (= (* p) 1))\n"
+             "  (defer\n"
+             "    (block\n"
+             "      (decl int x k)\n"
+             "      (defer\n"
+             "        (+= (* p) x))))\n"
+             "  (if k\n"
+             "    (defer\n"
+             "      (if (> k 1)\n"
+             "        (= (* p) 2)\n"
+             "        (= (* p) 3))))\n"
+             "  (for () () ()\n"
+             "    (defer\n"
+             "      (defer\n"
+             "        (post++ k))))\n"
+             "  (switch k\n"
+             "    (block\n"
+             "      (default)\n"
+             "      (defer\n"
+             "        (break)))))\n");
+    // A label after it parses, as clang parses one (a switch's jump into it is the code generator's error); a
+    // declaration does not, for the TS defers a statement.
+    CHECK(parsed("void f(int k) { switch (k) { defer case 1: k = 2; } }")
+          == "(function void f ((int k))\n"
+             "  (switch k\n"
+             "    (block\n"
+             "      (defer\n"
+             "        (case 1\n"
+             "          (= k 2))))))\n");
+    CHECK(parsed("void f() { defer int x = 1; }") == "test.fm:1:18: error: syntax error, unexpected int\n");
+    CHECK(parsed("void f() { int defer = 1; }")
+          == "test.fm:1:16: error: syntax error, unexpected defer, expecting * or identifier\n");
+    CHECK(parsed("module M { float x [[_Defer::_Defer]] [[ui::_Defer]]; };")
+          == "(module M\n  (field float x [[_Defer::_Defer]] [[ui::_Defer]]))\n");
+    CHECK(parsed("#define _Defer 1\n")
+          == "test.fm:1:9: error: '_Defer' cannot be used as a macro name: it is one of FMinus's keywords\n");
+}
+
+TEST_CASE("serve, route and reply parse as FMinus's statements, a JSON literal as an expression", "[frontend]")
+{
+    CHECK(parsed("void f(http_server s)\n"
+                 "{\n"
+                 "    serve (s)\n"
+                 "    {\n"
+                 "        route \"POST /note/{n}\" (const int n [[fminus::range(0, 127)]], float g) { reply 204; }\n"
+                 "        route \"GET /\" \"state\" { if (s) reply 200, json { g, \"a\" \"b\": [1, (2), {}], }; }\n"
+                 "        route \"PUT /x\" () [[x::y]] { reply 200, \"text/plain\", \"%d\", 1; }\n"
+                 "    }\n"
+                 "    serve (s, 10 * 2) { route \"GET /y\" { reply 200, json [g, [], { \"z\": true }]; } }\n"
+                 "    return json { };\n"
+                 "}\n")
+          == "(function void f ((http_server s))\n"
+             "  (serve s\n"
+             "    (route \"POST /note/{n}\" ((const int n [[fminus::range(0, 127)]]) (float g))\n"
+             "      (reply 204))\n"
+             "    (route \"GET /state\"\n"
+             "      (if s\n"
+             "        (reply 200 (json {\"g\" g \"ab\" [1 2 {}]}))))\n"
+             "    (route \"PUT /x\" () [[x::y]]\n"
+             "      (reply 200 \"text/plain\" \"%d\" 1)))\n"
+             "  (serve s (* 10 2)\n"
+             "    (route \"GET /y\"\n"
+             "      (reply 200 (json [g [] {\"z\" true}]))))\n"
+             "  (return (json {})))\n");
+    // Only a route stands in a serve's braces; a reply has a status; the words are keywords, and attributes' names.
+    CHECK(parsed("void f(http_server s) { serve (s) { int x = 1; route \"GET /\" { reply 1; } } }")
+          == "test.fm:1:36: error: only a route may stand in a serve's braces: route \"METHOD /path\" (parameters) "
+             "{ ... }\n");
+    CHECK(parsed("void f() { reply; }") == "test.fm:1:17: error: expected expression\n");
+    CHECK(parsed("void f() { int json = 1; }")
+          == "test.fm:1:16: error: syntax error, unexpected json, expecting * or identifier\n");
+    CHECK(parsed("void serve() { }") == "test.fm:1:6: error: syntax error, unexpected serve, expecting * or identifier\n");
+    CHECK(parsed("void f() { g(json { \"a\" 1 }); }")
+          == "test.fm:1:25: error: syntax error, unexpected number, expecting : or string literal\n");
+    for (const char* word : {"serve", "route", "reply", "json"})
+        CHECK(parsed(std::string("#define ") + word + " 1\n")
+              == std::string("test.fm:1:9: error: '") + word
+                     + "' cannot be used as a macro name: it is one of FMinus's keywords\n");
+}
+
+TEST_CASE("json (value) parses as a JSON literal of one value, and json_slice as a call in one", "[frontend]")
+{
+    CHECK(parsed("void f(float p, float* a, int n)\n"
+                 "{\n"
+                 "    file_write(\"out/p.json\", json (p));\n"
+                 "    file_append(\"out/a.jsonl\", json (*a + 1), n);\n"
+                 "    g(json { \"slice\": json_slice(a, n), \"one\": json ((p)) }, json (n));\n"
+                 "}\n")
+          == "(function void f ((float p) (float * a) (int n))\n"
+             "  (call file_write \"out/p.json\" (json p))\n"
+             "  (call file_append \"out/a.jsonl\" (json (+ (* a) 1)) n)\n"
+             "  (call g (json {\"slice\" (call json_slice a n) \"one\" (json p)}) (json n)))\n");
+    // Its value is one expression: json () is none.
+    CHECK(parsed("void f() { g(json ()); }") == "test.fm:1:20: error: syntax error, unexpected )\n");
+}
+
+TEST_CASE("if and switch parse C2y's declaration in their head, and its third form as the second", "[frontend]")
+{
+    CHECK(parsed("int f(int x)\n"
+                 "{\n"
+                 "    if (int n = g(x), *p; n > 0) return n; else return -n;\n"
+                 "    if (const json_doc doc = parse(x)) x = 1;\n"
+                 "    switch (int k = x; k) { default: break; }\n"
+                 "    switch (float4 v = x) ;\n"
+                 "    return x;\n"
+                 "}\n")
+          == "(function int f ((int x))\n"
+             "  (if (decl int n (call g x)) (decl int * p) (> n 0)\n"
+             "    (return n)\n"
+             "    (return (- n)))\n"
+             "  (if (decl const json_doc doc (call parse x)) doc\n"
+             "    (= x 1))\n"
+             "  (switch (decl int k x) k\n"
+             "    (block\n"
+             "      (default)\n"
+             "      (break)))\n"
+             "  (switch (decl float4 v x) v\n"
+             "    (empty))\n"
+             "  (return x))\n");
+    // What C2y refuses, in clang's words: a second declarator in the third form, at its comma; none with no
+    // initialiser; a second declaration where the condition goes; and a first clause that is no declaration.
+    CHECK(parsed("void f(int x)\n"
+                 "{\n"
+                 "    if (int a = 1, b = 2) x = 1;\n"
+                 "    if (int c) x = 2;\n"
+                 "    if (int d = 1; int e = 2) x = 3;\n"
+                 "    switch (x = 1; x) {}\n"
+                 "    if (; x) x = 4;\n"
+                 "}\n")
+          == "test.fm:3:18: error: multiple declarations are not allowed\n"
+             "test.fm:4:13: error: variable declaration in condition must have an initializer\n"
+             "test.fm:5:20: error: expected expression\n"
+             "test.fm:6:13: error: first clause in condition must be a declaration\n"
+             "test.fm:7:9: error: first clause in condition must be a declaration\n");
+}
+
 TEST_CASE("enumerations parse as C's, where they are among the functions and modules, and `enum Mode` is int",
           "[frontend]")
 {
@@ -302,6 +450,139 @@ TEST_CASE("double parses as C's: a type, a pointer's and an array's, and a cast;
           == "test.fm:1:6: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector lane\n"
              "test.fm:1:20: error: FMinus has poly float and poly bool, not 'poly double': a double is no vector "
              "lane\n");
+}
+
+TEST_CASE("the handle types are type words, as float4 is: a declaration's, a parameter's, a field's, an array's",
+          "[frontend]")
+{
+    CHECK(parsed("json_doc f(http_response r, const http_request q, xml_doc x[4]) { http_server s, t[2][3]; "
+                 "file_content c = g(file_listing_n); fft_plan p; return x[0]; }\n"
+                 "module M { file_listing l; http_response pending[16]; };\n")
+          == "(function json_doc f ((http_response r) (const http_request q) (xml_doc * x))\n"
+             "  (decl http_server s)\n"
+             "  (decl http_server[2][3] t)\n"
+             "  (decl file_content c (call g file_listing_n))\n"
+             "  (decl fft_plan p)\n"
+             "  (return ([] x 0)))\n"
+             "(module M\n"
+             "  (field file_listing l)\n"
+             "  (field http_response[16] pending))\n");
+    // A pointer to one parses, as C's would; the code generator refuses it (HandleTest.cpp). Each word is a keyword,
+    // and so no name of a variable, nor of a macro, but an attribute's name, as C23 reads a keyword there.
+    CHECK(parsed("void f() { json_doc* p; }") == "(function void f ()\n  (decl json_doc * p))\n");
+    CHECK(parsed("void f() { int json_doc = 1; }")
+          == "test.fm:1:16: error: syntax error, unexpected handle type, expecting * or identifier\n");
+    for (const char* word : {"http_response", "http_request", "http_server", "json_doc", "xml_doc", "file_content",
+                             "file_listing", "fft_plan"})
+    {
+        const std::string attributes = std::string("[[") + word + "::" + word + "]] [[ui::" + word + "]]";
+        CHECK(parsed("module M { float x " + attributes + "; };")
+              == "(module M\n  (field float x " + attributes + "))\n");
+        CHECK(parsed(std::string("#define ") + word + " 1\n")
+              == "test.fm:1:9: error: '" + std::string(word)
+                     + "' cannot be used as a macro name: it is one of FMinus's keywords\n");
+    }
+}
+
+TEST_CASE("string and char are type words; a literal is a string's value, a case's and an operand's", "[frontend]")
+{
+    CHECK(parsed("string f(string s, const char* p, char buf[8]) { char name[4][16]; string t = \"a\" \"b\"; "
+                 "switch (s) { case \"x\": return t; } return s == \"y\" ? s : t; }\n"
+                 "module M { string label; char text[32]; };\n")
+          == "(function string f ((string s) (const char * p) (char * buf))\n"
+             "  (decl char[4][16] name)\n"
+             "  (decl string t \"ab\")\n"
+             "  (switch s\n"
+             "    (block\n"
+             "      (case \"x\")\n"
+             "      (return t)))\n"
+             "  (return (?: (== s \"y\") s t)))\n"
+             "(module M\n"
+             "  (field string label)\n"
+             "  (field char[32] text))\n");
+    // Each word is a keyword: no variable's name, nor a macro's, but an attribute's (above, every keyword's).
+    CHECK(parsed("void f() { int string = 1; }")
+          == "test.fm:1:16: error: syntax error, unexpected string, expecting * or identifier\n");
+    CHECK(parsed("#define char 1\n") == "test.fm:1:9: error: 'char' cannot be used as a macro name: it is one of "
+                                         "FMinus's keywords\n");
+}
+
+TEST_CASE("when parses as FMinus's statement: a condition in parentheses, and a statement", "[frontend]")
+{
+    CHECK(parsed("module M { int n; void f(bool c) { when (c) n++; when (n > 2) { n = 0; } } };\n")
+          == "(module M\n"
+             "  (field int n))\n"
+             "(method void M::f ((bool c))\n"
+             "  (when c\n"
+             "    (post++ n))\n"
+             "  (when (> n 2)\n"
+             "    (block\n"
+             "      (= n 0))))\n");
+    // A keyword: no variable's name. Outside a method it parses, and is the code generator's error (WhenTest.cpp).
+    CHECK(parsed("void g() { int when = 1; }\n")
+          == "test.fm:1:16: error: syntax error, unexpected when, expecting * or identifier\n");
+    CHECK(parsed("void g(bool c) { when (c) {} }\n") == "(function void g ((bool c))\n  (when c\n    (block)))\n");
+}
+
+TEST_CASE("within parses as FMinus's statement: milliseconds in parentheses, and a block", "[frontend]")
+{
+    CHECK(parsed("int f(int port, int ms) { http_response r; within (ms * 2) { r = g(port); defer h(r); within (10) "
+                 "{ } } return 0; }\n")
+          == "(function int f ((int port) (int ms))\n"
+             "  (decl http_response r)\n"
+             "  (within (* ms 2)\n"
+             "    (block\n"
+             "      (= r (call g port))\n"
+             "      (defer\n"
+             "        (call h r))\n"
+             "      (within 10\n"
+             "        (block))))\n"
+             "  (return 0))\n");
+    // Braces required: its body is a block, as a route's is. A keyword: no variable's name, nor a macro's; await
+    // stays an identifier.
+    CHECK(parsed("void f() { within (10) g(); }\n")
+          == "test.fm:1:24: error: syntax error, unexpected identifier, expecting {\n");
+    CHECK(parsed("void g() { int within = 1; }\n")
+          == "test.fm:1:16: error: syntax error, unexpected within, expecting * or identifier\n");
+    CHECK(parsed("#define within 1\n") == "test.fm:1:9: error: 'within' cannot be used as a macro name: it is one of "
+                                           "FMinus's keywords\n");
+    CHECK(parsed("int await(int x) { int await = x; return await; }\n")
+          == "(function int await ((int x))\n  (decl int await x)\n  (return await))\n");
+}
+
+TEST_CASE("a route's block holds a when, a string and a char array as any block does", "[frontend]")
+{
+    CHECK(parsed("module M { http_server s; void f() { serve (s) { route \"GET /a\" (int n) { char c[4] = \"ab\"; "
+                 "string t = \"x\"; when (n > 0) reply 204; switch (t) { case \"x\": reply 200; } } } } };\n")
+          == "(module M\n"
+             "  (field http_server s))\n"
+             "(method void M::f ()\n"
+             "  (serve s\n"
+             "    (route \"GET /a\" ((int n))\n"
+             "      (decl char[4] c \"ab\")\n"
+             "      (decl string t \"x\")\n"
+             "      (when (> n 0)\n"
+             "        (reply 204))\n"
+             "      (switch t\n"
+             "        (block\n"
+             "          (case \"x\")\n"
+             "          (reply 200))))))\n");
+}
+
+TEST_CASE("a route's string parameters, its default a string, and an address's holes, which are its literal's bytes",
+          "[frontend]")
+{
+    CHECK(parsed("void f(http_server s, string name)\n"
+                 "{\n"
+                 "    http_response r = http_get(\"https://x.com/{name}/{{a}}\");\n"
+                 "    serve (s) { route \"PUT /p/{name}\" (string name, string mode [[fminus::default(\"full\")]]) "
+                 "{ reply 204; } }\n"
+                 "}\n")
+          == "(function void f ((http_server s) (string name))\n"
+             "  (decl http_response r (call http_get \"https://x.com/{name}/{{a}}\"))\n"
+             "  (serve s\n"
+             "    (route \"PUT /p/{name}\" ((string name) (string mode [[fminus::default(\"full\")]]))\n"
+             "      (reply 204))))\n");
 }
 
 TEST_CASE("constants keep their spelling: C's decimal, hex and integer forms", "[frontend]")

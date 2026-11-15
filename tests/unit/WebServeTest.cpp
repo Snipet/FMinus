@@ -14,6 +14,7 @@
 #if FMINUS_HAS_WEB_SERVER && !defined(_WIN32)
 
 #include "HeapCalls.h"
+#include "StrictMode.h"
 #include "fminus/FMinus.h"
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
@@ -28,6 +29,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -50,14 +52,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#if defined(__linux__)
-#include <linux/seccomp.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#endif
-
 namespace
 {
+#if FMINUS_HAS_JSON
     // The program that serves: a synth whose process() takes the requests waiting, between blocks, and whose load()
     // takes them on a thread of the host's, in http_accept, until its server closes.
     constexpr const char* kSynth =
@@ -189,6 +186,7 @@ namespace
         "    http_close(r);\n"
         "    return status * 1000 + size;\n"
         "}\n";
+#endif
 
     std::unique_ptr<fminus::Program> compileProgram(const char* source, const fminus::Program::Options& options)
     {
@@ -492,8 +490,9 @@ TEST_CASE("an executable serves with FMINUS_WEB_LISTEN, its files from FMINUS_WE
     };
 
     {
-        // The third request's reply may never be sent: main returns at once after it, and its context, its server
-        // with it, is destroyed then, before the I/O thread's next turn (as a Program's would be).
+        // The third request's reply is sent all the same: main returns at once after it, and its context, its server
+        // with it, is destroyed then, maybe before the I/O thread's next turn; closing sends the replies handed over
+        // first (as a Program's destruction does).
         std::pair<int, std::string> result;
         std::thread server([&] {
             result = run("env FMINUS_WEB_LISTEN='127.0.0.1:" + std::to_string(port) + "' FMINUS_WEB_ROOT='" +
@@ -506,7 +505,7 @@ TEST_CASE("an executable serves with FMINUS_WEB_LISTEN, its files from FMINUS_WE
         const int two = add(port, 2);
         const int last = add(port, 0);
         server.join();
-        CHECK((last == 200000 + 2 || last == FMINUS_WEB_TRANSPORT));
+        CHECK(last == 200000 + 2);
         CHECK(index == 200000 + 12);    // the root's index.html at "/", served by the library
         CHECK(script == 200000 + 2);
         CHECK(one == 200000 + 2);       // "40"
@@ -719,40 +718,23 @@ TEST_CASE("a [[clang::nonblocking]] handler, compiled by the JIT, takes, reads a
         bool checked = false;
         for (int attempt = 0; attempt < 200 && !checked; ++attempt)
         {
-            int fds[2];
-            REQUIRE(::pipe(fds) == 0);
-            const pid_t child = ::fork();
-            REQUIRE(child >= 0);
-            if (child == 0)
+            const fminus::test::Sealed<std::array<double, 2>> result = fminus::test::inStrictMode(
+                [&]
+                {
+                    std::array<double, 2> taken{0, 0};
+                    taken[0] = handle(instance.memory(), kind, &taken[1]);
+                    return taken;
+                });
+            if (!result.available())
             {
-                ::close(fds[0]);
-                if (::prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) != 0)
-                    ::syscall(SYS_exit, 2);
-                double result[2] = {0, 0};
-                result[0] = handle(instance.memory(), kind, &result[1]);
-                const ssize_t written = ::write(fds[1], result, sizeof result);
-                ::syscall(SYS_exit, written == sizeof result ? 0 : 1);
-            }
-            ::close(fds[1]);
-            int status = 0;
-            ::waitpid(child, &status, 0);
-            double result[2] = {0, 0};
-            const ssize_t got = ::read(fds[0], result, sizeof result);
-            ::close(fds[0]);
-            INFO("status " << status);
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 2)
-            {
-                WARN("seccomp's strict mode is not available here: the system calls are not checked");
-                checked = true;
+                checked = true;   // it warned: the system calls are not checked
                 kind = 3;
                 break;
             }
-            REQUIRE(WIFEXITED(status));
-            REQUIRE(WEXITSTATUS(status) == 0);
-            REQUIRE(got == static_cast<ssize_t>(sizeof result));
-            if (result[0] == 1)
+            REQUIRE(result.returned());   // its failure says why
+            if ((*result)[0] == 1)
             {
-                CHECK(result[1] == expected);
+                CHECK((*result)[1] == expected);
                 checked = true;
             }
             else

@@ -1,0 +1,42 @@
+// A within's errors (src/ir/Within.cpp, Effects.cpp, Statements.cpp), each once, at its column: it waits where it
+// ends, as http_wait does, so a nonblocking function refuses it in http_wait's words; its begin allocates, so a
+// nonallocating function refuses it as an allocation, and a function that calls one holding it is refused with a note
+// at the within; a switch may not jump into its block; its milliseconds are an int, converted as an argument is.
+// REQUIRES: web
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+void audio(int ms) [[clang::nonblocking]]
+{
+    within (ms) { }
+}
+// CHECK: within-errors.fm:10:5: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'http_wait'
+
+void quiet(int ms) [[clang::nonallocating]]
+{
+    within (ms) { }
+}
+// CHECK: within-errors.fm:16:5: error: function with 'nonallocating' attribute must not allocate or deallocate memory
+
+void loads() { within (100) { } }
+void caller() [[clang::nonallocating]] { loads(); }
+// CHECK: within-errors.fm:21:42: error: function with 'nonallocating' attribute must not call non-'nonallocating' function 'loads'
+// CHECK-NEXT: within-errors.fm:20:16: note: function cannot be inferred 'nonallocating' because it allocates or deallocates memory
+
+int jump(int k)
+{
+    switch (k)
+    {
+    case 0:
+        within (10)
+        {
+        case 1:
+            return 1;
+        }
+    }
+    return 0;
+}
+// CHECK: within-errors.fm:32:9: error: cannot jump from switch statement to this case label
+// CHECK-NEXT: within-errors.fm:30:9: note: jump enters a 'within' block
+
+void pointer(float* p) { within (p) { } }
+// CHECK: within-errors.fm:41:34: error: passing 'float *' to parameter of incompatible type 'int'

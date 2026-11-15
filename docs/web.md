@@ -16,20 +16,20 @@ runs, and the library answers everything else itself. [The server](#the-server) 
 ```c
 module Loader
 {
-    void* request;
+    http_response request;
     float table[2048];
     int length;
 
     void load(int preset)                                      // the host calls it off the audio thread
     {
         request = http_get("https://example.com/presets/%d.json", preset);
+        defer http_close(request);                             // however load ends
         if (http_wait(request, 10000) == 200)                  // blocks: refused in a nonblocking function
         {
-            void* doc = json_parse(http_body(request), http_size(request));
+            json_doc doc = json_parse(http_body(request), http_size(request));
+            defer json_free(doc);
             length = json_floats(doc, "/table", table, 2048);
-            json_free(doc);
         }
-        http_close(request);
     }
 };
 ```
@@ -42,8 +42,8 @@ for (const auto& request : program->webRequests())               // every URL, b
     show(request.method, request.pattern, request.line);         // GET https://example.com/presets/*.json 11
 ```
 
-Contents: [building it](#building-it), [the builtins](#the-builtins), [the status codes](#the-status-codes), [the
-host's side](#the-hosts-side), [the pattern language](#the-pattern-language), [the driver and
+Contents: [building it](#building-it), [the builtins](#the-builtins), [the status codes](#the-status-codes),
+[within](#within), [the host's side](#the-hosts-side), [the pattern language](#the-pattern-language), [the driver and
 executables](#the-driver-and-executables), [threads and lifetime](#threads-and-lifetime), [determinism and offline
 rendering](#determinism-and-offline-rendering), [plugins](#plugins-and-entitlements), [the server](#the-server) (its
 [building](#building-the-server), [builtins](#the-servers-builtins), [routes and replies](#routes-and-replies), [the
@@ -95,8 +95,9 @@ fetches.
 
 | Builtin | Does | Effect |
 |---|---|---|
-| `void* http_get(url, ...)` | starts a GET of the URL and returns its request, a handle, at once | allocates |
-| `void* http_post(url, data, bytes, content_type, ...)` | starts a POST of `bytes` bytes at `data` (copied: the buffer is free again when it returns) | allocates |
+| `http_response http_get(url, ...)` | starts a GET of the URL and returns its request, a handle, at once | allocates |
+| `http_response http_post(url, data, bytes, content_type, ...)` | starts a POST of `bytes` bytes at `data` (copied: the buffer is free again when it returns) | allocates |
+| `http_response http_post(url, json ..., ...)` | starts a POST of a JSON literal's text, sent as `application/json`: measured, refused over the policy's `maxBodyBytes` (`HTTP_LIMIT`), written into the request's own body ([The JSON literal](#the-json-literal)) | allocates |
 | `int http_wait(r, timeout_ms)` | blocks until the request is done or `timeout_ms` has passed (0: not at all; negative: until done, which the policy's timeout bounds), and gives its status then, 0 if still pending | blocks |
 | `int http_status(r)` | 0 while pending, the HTTP status once a response arrived, or a failure (below) | wait-free |
 | `int http_size(r)`, `const void* http_body(r)` | the body's bytes and its address, once the status is an HTTP status (0 and null before, and after a failure); valid until `http_close`. A NUL follows the last byte, not counted | wait-free |
@@ -110,7 +111,23 @@ fetches.
   backslash (so no CR or LF: nothing a program writes adds a header to a request), its scheme `http` or `https`, and
   it carries no credentials (no `@` before its path); each mistake is an error at its byte. The content type is a
   literal too, printable ASCII, at most 255 bytes (empty: `application/octet-stream`).
-- **A request is an opaque `void*`**, as an FFT plan is. A refused request is a request too, its status already set:
+- **Or the URL names its values where they go, in holes**: `http_get("https://example.com/users/{user}/presets/{k}.json")`,
+  each `{name}` a variable in scope (a local, a parameter, a field, a constant: a name, not an expression), an `int`,
+  a `bool` or an enumeration's value (written in decimal, as `%d` is) or a `string`. A literal has `%d`s or holes, not
+  both, and a literal with holes takes no ints after it; `{{` and `}}` are a brace, `%%` a percent sign still. No hole
+  may be in the scheme or the host; a port may be an `int`'s; the path, the query and the fragment take either. **A
+  string is percent-encoded** as it is filled in, every byte but the unreserved ones (`A`-`Z`, `a`-`z`, `0`-`9`, `-`,
+  `.`, `_`, `~`) written `%XX`, so it cannot add a `/`, a `?`, a `#` or a `%` of its own; in the path, one that makes
+  a whole segment `.`, `..` or empty makes the request `HTTP_INVALID` before anything is sent. The URL filled in is
+  then checked as every URL is (the policy's patterns, its 8192 bytes, the rest). The host's list
+  (`Program::webRequests()`) has a `*` for each hole, as for each `%d`. Each mistake is an error at its byte: a brace
+  alone, an empty hole, a name that is none, a hole of another type ("hole {x} has type 'float': a hole takes an int, a
+  bool, an enumeration's value or a string"), one in the host, a string's in the port, a `%d` beside a hole.
+- **A request is an opaque `http_response`**, as an FFT plan is an `fft_plan`: C's handle, a pointer to a struct the
+  program never sees, which the compiler keeps apart from the other handles (`http_status(doc)` of a `json_doc` is an
+  error), while a `void*` converts to it and back, as in C, so a program that says `void*` compiles as before
+  ([extending.md](extending.md), recipe 44). `defer http_close(r);` closes it on every path out of its block. A
+  refused request is a request too, its status already set:
   `http_get` returns null only when memory ran out. A null handle does nothing and reads as a failed request:
   `http_status` and `http_wait` give `HTTP_INVALID`, `http_size` 0, `http_body` null, and `http_cancel` and
   `http_close` nothing.
@@ -122,8 +139,8 @@ fetches.
   thread can start, wait for or free a request.
 - **The reads change from another thread.** Their declarations say so to LLVM (they are not `readonly`), so a polling
   loop reads the status again each time round, and two calls are never merged.
-- **A body is bytes.** `json_parse`, `xml_parse`, `bytes_floats` and `bytes_pcm16` turn it into numbers; FMinus has no
-  strings, and nothing gives a program a body as text.
+- **A body is bytes.** `json_parse`, `xml_parse`, `bytes_floats` and `bytes_pcm16` turn it into numbers, and
+  `string_of(http_body(r), http_size(r))` views it as text, a `string` valid until `http_close`.
 
 ## The status codes
 
@@ -153,6 +170,90 @@ not sent.
 a macro in code, so C's way for a library's constants (`EOF`, `errno`'s) is not open, and a builtin enumeration would
 give the names a type of FMinus's own that a program cannot name. Constants with an enumeration's behaviour, outside
 the file's scope, are what C's `<errno.h>` names would be if they were declarations.
+
+## within
+
+`within (milliseconds) { ... }` is a deadline around everything a block starts, and a promise about it: where the block
+ends, every request the thread running it started in it has ended. It is `parallel { }`'s promise ("has finished,
+every statement, where it ends") for requests, and Trio's `move_on_after`, Kotlin's `withTimeout`, with C's syntax and
+no closure: the deadline is a scope, so nothing has to be passed down to the functions the block calls.
+
+```c
+enum { MOST = 16 };
+
+float main(float count)
+{
+    const int packs = (int)count < MOST ? (int)count : MOST;
+    http_response r[MOST];
+    within (10000)                                   // all of them at once; none is still running after the block
+    {
+        for (int k = 0; k < packs; ++k)
+            r[k] = http_get("https://example.com/packs/%d.json", k);
+    }
+    int loaded = 0;
+    for (int k = 0; k < packs; ++k)                  // every r[k] has its final status: 200, a failure, HTTP_TIMEOUT
+    {
+        defer http_close(r[k]);
+        loaded += http_status(r[k]) == 200 ? 1 : 0;
+    }
+    return (float)loaded;
+}
+```
+
+- **The form**: the keyword, an `int` in parentheses, computed once where the block begins (a `float` converts as an
+  argument does), and a block, braces required. A negative value is no deadline of its own: the block still waits for
+  what it started, as long as each request's own policy lets it run.
+- **The promise.** Every request the block started (`http_get`, `http_post`, a URL with holes as one without), in the
+  block itself or in any function it called, has ended where it ends: the end waits for those still pending until the
+  deadline, then cancels what is left, whose status is `HTTP_TIMEOUT` (time ended it, not the program). A request the
+  block's code closed already is not the end's concern. Each request keeps its policy's own limits (`timeoutMs`,
+  `maxRequests`) besides.
+- **The deadline bounds every wait inside the block**: `http_wait`, `http_accept`, a `serve` with a timeout, and the
+  block's own end. A wait whose own timeout is later than the deadline, or that has none (`http_wait(r, -1)`), returns
+  when the deadline passes, with what it would have returned on its own timeout (`http_wait`: the status, 0 if still
+  pending; `http_accept`: null; a `serve`: no request). A shorter timeout of its own still counts.
+- **Leaving early.** `return`, `break` and `continue` out of the block, and a `reply` in a route, do what its end does
+  first, exactly once: wait for or cancel what the block started, then leave. A `defer` in the block runs before that
+  wait, as it does before the block's end; a `reply` is sent before it, so the route's client has its answer while its
+  scope's requests end, as a route's deferred statements run after its reply (recipe 45). A `return`'s value is
+  computed before either. The lowering is `defer`'s: the scope's end is a deferred action of a block around the
+  braces, whose code is at each way out.
+- **Nesting.** An inner block cannot outlast an outer one: its deadline is the earlier of its own and the outer's. A
+  request belongs to the innermost block it was started in, and an outer block's end does not wait for an inner's
+  (whose end has ended them already).
+- **Whose requests.** A block's scope is its thread's and its program's: requests the thread running it starts, and the
+  waits that thread makes. Two threads in two blocks do not see each other's. **A `parallel` region inside a block runs
+  on other threads**: a request an iteration or a statement starts on one of the pool's threads is not the block's, the
+  block's end does not wait for it, and its waits are not bounded by the block's deadline. (The calling thread works
+  in the region too, and what it runs there is the block's: so which of a region's requests the end waits for is the
+  pool's choice. Start a block's requests outside a region, or give the region's body a `within` of its own.) A
+  `within` inside a region's body is the body's thread's own, and ends there (a region's body cannot be left any other
+  way).
+- **It blocks**, and its beginning allocates (the scope is kept in the program's context): a
+  `[[clang::nonblocking]]` function refuses it in the words it refuses `http_wait` in, "must not call
+  non-'nonblocking' function 'http_wait'", and a `[[clang::nonallocating]]` one in clang's words for an allocation,
+  "must not allocate or deallocate memory", each at the `within`; a function that calls one holding it is refused at
+  the call, with a note at the `within`. On the audio thread, where a program cannot wait, `when` is the statement:
+  `when (http_status(request) == 200) ...` runs once, on the block the response arrived in (`examples/fetch/`'s
+  `Live`).
+- **A switch may not jump into one**: a `case` label inside its block, past where its scope begins, is clang's "cannot
+  jump from switch statement to this case label", with a note at the `within` ("jump enters a 'within' block").
+- **When its beginning fails** (no memory for the scope), the block runs with no deadline and nothing to wait for at its
+  end, and its end ends nothing: an enclosing block's scope is not ended in its place.
+- **A call the loop budget or a bounds check stops** (recipes 29 and 30) leaves the block without reaching its end, as
+  it leaves every block, and runs no deferred statement. A scope is its thread's, found by the thread's id, so one left
+  open would bound the thread's later waits by a deadline long past, and a later thread given the same id would find it.
+  So each way out those checks make, in a function that begins a scope, first **abandons** the thread's scopes: no
+  wait, nothing cancelled; their requests go on as requests started outside any block do, under the policy's limits,
+  freed with the program if it never closes them; afterwards the thread has no scope, and its next block has its own
+  deadline. The abandon takes no lock, allocates nothing and makes no system call (an audio thread's stop path may run
+  it). A program compiled without either check is as it was.
+- **In a build without the library** it is parsed, and is the error `http_wait` is there: "'within' needs the web
+  library, which this build of FMinus leaves out (FMINUS_WEB=OFF)".
+- **Underneath** are three of the library's functions (`src/web/Web.h`, "deadline scopes"): `within_begin` and
+  `within_end`, which the block calls where it begins and at each way out, and `within_abandon`, which the stopped
+  call's way out calls. `within` is a keyword; `await` is not (FMinus has no `async`, and a word reserved for nothing
+  would break programs for nothing). [extending.md](extending.md), recipe 49, walks through it.
 
 ## The host's side
 
@@ -293,6 +394,9 @@ its user controls at run time without rebuilding it. Neither is anything the pro
   What completed stays readable. A host that shuts a program down while a thread of its own is inside it (a loader
   blocked in `http_wait`) calls `stopWeb()`, joins that thread, then destroys the `Program`. Destroying a `Program`
   while a thread still runs its code is undefined, as it always is.
+- **A thread at a `within` block's end** is woken by `stopWeb()` as one in `http_wait` is: the block's requests end
+  as `HTTP_CANCELLED`, and the block ends at once. A `within` begun after the stop has its requests cancelled as they
+  start, and nothing to wait for.
 - **`~Program`** stops the network, then destroys the context: every request the program made, closed or not, is
   freed, every thread still in the library's `http_wait` is woken and has left it, and the I/O thread is joined if this
   was the last context. A program that never closes what it opens leaks nothing past its `Program`, and no I/O thread
@@ -312,6 +416,12 @@ that starts using a table on the block in which it arrived: the block a response
 
 The load-then-run shape keeps it: fetch and parse in `init` or a loader method, off the audio thread, wait for the
 result, and only then play. Then the output depends on the payload alone, as it does on a preset file.
+
+A `within` block changes nothing of this. It waits as `http_wait` does, off the audio thread, and a request its
+deadline cancels is one whose result depended on the network's timing, as a wait with a timeout's does: a loader that
+must be repeatable gives its block a deadline it is content to fail at, and treats `HTTP_TIMEOUT` as it treats any
+failure. A `when` that swaps a table in on the block it arrived in (`examples/fetch/`'s `Live`) is the polling shape
+above, and gives determinism up in just those words.
 
 An offline bounce should not depend on a server. A host that renders offline fetches before it renders (and refuses
 to start, or reports, when a fetch failed); a disk cache and an `offline` policy (serve the cache or fail) are the
@@ -344,16 +454,18 @@ report's answer, and are not built yet (below).
 ## The server
 
 A program serves when its host lets it: `http_listen()` starts its server where the host's policy says, and the program
-**takes** the requests that reach it and answers each, as it polls a download's status. FMinus has no callbacks and no
-strings, so a program sees a request as a route it named, numbers and bytes: never a path as text, a header or a
-cookie. Taking, reading and answering a request are wait-free, so the audio thread may serve between two blocks, and a
-change lands at a block boundary on the thread that computes the block, with no lock and no second thread touching
-the program's state:
+**takes** the requests that reach it and answers each, as it polls a download's status. FMinus has no callbacks: a
+program sees a request as a route it named, its parameters (numbers, and `string`s of its path and query), its bytes
+and its text as views of what the library holds (`http_path`, `http_header`, `http_query_string`), valid until its
+reply. Taking, reading
+and answering a request are wait-free, so the audio thread may serve between two blocks, and a change lands at a block
+boundary on the thread that computes the block, with no lock and no second thread touching the program's state. A
+`serve` statement says it, FMinus's own ([its section](#serve-route-and-reply)):
 
 ```c
 module Synth
 {
-    void* server;
+    http_server server;
     float gain;
     float level;                                          // a meter process() keeps
 
@@ -361,20 +473,26 @@ module Synth
 
     void process(float* out, int n) [[clang::nonblocking]]
     {
-        for (void* r = http_next(server); r; r = http_next(server))     // wait-free: each request waiting, or none
+        serve (server)                                    // wait-free: each request waiting for its routes, or none
         {
-            if (http_is(r, "POST /gain"))                                // a route literal, checked when compiled
+            route "POST /gain" (float value [[fminus::range(0, 1)]])   // POST /gain?value=0.5; out of range: 400
             {
-                gain = http_query_float(r, "value", gain);               // POST /gain?value=0.5
-                http_reply(r, 204);
+                gain = value;
+                reply 204;                                // answers, and leaves the route
             }
-            else if (http_is(r, "GET /state"))
-                http_reply_text(r, 200, "application/json", "{\"gain\":%g,\"level\":%g}", gain, level);
+            route "GET /state"
+            {
+                reply 200, json { gain, level };          // {"gain":0.5,"level":0.25}
+            }
         }
         // ... the block, with gain as it now is
     }
 };
 ```
+
+It is made of builtins a program can call itself ([the server's builtins](#the-servers-builtins)), the same requests
+taken and answered: the loop above is `for (http_request r = http_next(server); r; r = http_next(server))` with a chain
+of `if (http_is(r, "POST /gain"))`, the checks and the replies written by hand.
 
 ```cpp
 fminus::Program::Options options;
@@ -382,7 +500,7 @@ options.web.server.listen = "localhost:0";                      // nothing given
 options.web.server.files = {{"/", "text/html; charset=utf-8", page}};   // the page, served by the library
 auto program = fminus::Program::compile(source, errors, options);
 for (const auto& route : program->webRoutes())                  // every route, before anything runs
-    show(route.method, route.pattern, route.line);              // POST /gain 14
+    show(route.method, route.pattern, route.line);              // POST /gain 15, its parameter value, 0 to 1
 // ... init() listens; then:
 open("http://localhost:" + std::to_string(program->webPort()) + "/");
 ```
@@ -433,32 +551,245 @@ with `FMINUS_WEB`.
 #endif
 ```
 
+### serve, route and reply
+
+Three statements of FMinus's own, as `parallel` is: not C's, and a program that uses them is no C program. They put
+syntax over the builtins below, and make two of the server's rules ones the compiler checks: a request taken is
+answered, once; and a route's numbers are in range before its code runs.
+
+```c
+serve (server)                 // each request now waiting for one of these routes, oldest first; wait-free
+{
+    route "POST /gain" (float value [[fminus::range(0, 1)]])          // POST /gain?value=0.5
+    {
+        gain = value;
+        reply 204;
+    }
+    route "POST /note/{note}" (int note [[fminus::range(0, 127)]])    // POST /note/69
+    {
+        pitch = 440.0f * expf(0.05776227f * (float)(note - 69));
+        reply 204;
+    }
+    route "GET /state"
+    {
+        reply 200, json { gain, pitch };
+    }
+}
+
+serve (server, 100)            // the same, waiting up to 100 ms when none is waiting; blocks
+{
+    route "PUT /preset/{k}" (int k, http_request r) { ... reply 201; }
+}
+```
+
+**`serve (server) { routes }`** takes each request now waiting **for one of its routes**, oldest first, and runs that
+route's block; when none is waiting it is done. It is wait-free, as the loop over `http_next` is, and allowed in a
+`[[clang::nonblocking]]` function when its routes' blocks are. **`serve (server, timeout_ms) { routes }`** first waits
+up to `timeout_ms` for one (0: not at all; negative: until one comes or the server closes), as `http_accept` does, then
+handles every one waiting and is done: it blocks, and a nonblocking function refuses it as it refuses `http_accept`
+("function with 'nonblocking' attribute must not call non-'nonblocking' function 'http_accept'", at the `serve`).
+`server` is an `http_server` (or a `void*`), the timeout an `int`, each computed once.
+
+- **A serve takes only its own routes' requests.** A request for a route another `serve` of the program names, or an
+  `http_is` elsewhere, is left waiting for that one, so a program answers `POST /gain` on its audio thread and
+  `PUT /preset/{k}`, which parses JSON and so allocates, on a thread of its host's: two serves, two threads, each
+  taking its own. (`http_next` and `http_accept` still take any request.) A request no one takes is answered 503 by
+  the library at `replyTimeoutMs`, as one always was.
+- **Its routes' blocks are blocks of the function the serve is in**: they see its locals, and in a method its module's
+  fields; the function's effects are checked over them as over any block; no function is made, and nothing is called
+  back. Only routes stand in a serve's braces, and a serve has at least one.
+
+**`route "METHOD /path" (parameters) { block }`**, or with no parameter list. Its literal is a route as `http_is`'s is
+([routes and replies](#routes-and-replies): the methods, the path's bytes, every error at its byte), with **holes**,
+`{name}`, where a `%d` could stand: a whole segment or part of one (`"/osc/{k}/gain"`, `"/v{major}"`), at most 8 a
+route, never two together nor one before a digit. `%d` is `http_is`'s spelling, and an error in a route. Each hole is
+one of the route's parameters, each a different one. **A parameter** is `type name attributes`, the type `int`,
+`float`, `bool`, `string` or `http_request` (`char`, and any other type, is refused). **A `string`'s hole is a whole
+segment** (`"/presets/{name}"`; `"/presets/{name}.json"` is an error, "a string's hole is a whole segment of the path"),
+a `%s` to the library:
+
+| A parameter | Is filled from | When the request does not fit |
+|---|---|---|
+| named in a hole, an `int` | that part of the path: digits, as `%d` takes them (no sign; 1 to 10 digits that fit an `int`) | the route does not match: the library's 404 |
+| named in a hole, a `string` | that segment of the path, its bytes as the server holds them (letters, digits, `-`, `.`, `_`, `~`; never `.` or `..`), valid until the reply | (a path of other bytes is the library's 400 before any route) |
+| any other `int`, `float` or `bool` | the query's field of its name, read as `http_query_int` and `http_query_float` read (a `bool` is `true`, `false`, `1` or `0`) | missing, or not a value of its type: **400**, and the block does not run. With `[[fminus::default(x)]]`, missing is `x` (a malformed one is still 400) |
+| any other `string` | the query's field of its name, its value's bytes as sent (nothing is decoded, as nothing is for a number), valid until the reply; `?v=` and `?v` are present and empty | missing: **400**, or its `[[fminus::default("text")]]` |
+| with `[[fminus::range(a, b)]]` (path or query) | | outside it: **400**, and the block does not run |
+| an `http_request` (one at most) | the request itself, for `http_body`, `http_size` and the rest | |
+
+The 400s are the compiled code's, before the block: wait-free, a reply with no body. A parameter's attributes are a
+module parameter's, checked as there (a range's ends in order, a default inside its range; an `int`'s default an
+integer, a `bool`'s 0 or 1, a `string`'s a string literal, and a `string` has no range); a hole's has no default, and
+`json::name` and `json::skip`, a module's fields' (`json_read`'s), are unknown attributes there. **Parameters are
+`const`** variables of the route's block, in
+scope there only, as a function's are in its body: two routes of a serve may use the same names. Attributes after the
+parameter list are refused (`'clang::nonblocking' attribute cannot be applied to a route: ...`): a route is a block of
+its function, whose attributes cover it.
+
+**`reply status;`**, or **`reply status, more...;`**, answers the route's request and leaves the route. Its forms are
+the four reply builtins' arguments without the request, the fourth's a JSON literal ([below](#the-json-literal)):
+
+| Written | Is | Content type |
+|---|---|---|
+| `reply 204;` | `http_reply(r, 204)` | none |
+| `reply 200, data, bytes, "content/type";` | `http_reply_bytes(r, 200, data, bytes, "content/type")` | as given |
+| `reply 200, "content/type", "format", values...;` | `http_reply_text(r, ...)`, a format as [below](#routes-and-replies) | as given |
+| `reply 200, json { ... };` | `http_reply_json(r, 200, json { ... })`: the literal, written into the request's buffer | `application/json` |
+
+Which form it is follows from the values (one; a string literal second, or a `string`, which is the text form's
+error, its content type and format literals only; a JSON literal second; four), and each is checked as its builtin
+checks its arguments, in the same words; a reply that fits none says what the forms are.
+
+- **It leaves the route**, as `return` leaves a function: the reply is sent, then the deferred statements of the route's
+  blocks run (as a `return`'s value is computed before them), and the serve goes on to its next request.
+- **Every path through a route must reach a `reply`**, the analysis of a non-void function's missing `return`, constant
+  conditions and all: `route 'GET /state' does not reply` (no path does) or `... does not reply in all control paths`,
+  at the route's closing brace. A `when`, `when (c) reply 204;`, may not run its statement, as an `if` without an
+  `else`; a `switch`, on a `string` too, replies on every path only with a `default`.
+- **What a route may not do**, each an error at its keyword: `return` ("cannot return from a route: a route ends with a
+  reply"); a `break` or `continue` that would leave it (one of a loop of its own is a loop's); a `serve` of its own; a
+  `reply` in a deferred statement ("cannot reply from a defer statement"); and a `case` label a `switch` around the
+  serve would jump to. A `reply` outside a route is "'reply' statement not in a route".
+- **A reply the library refuses** with the request still the route's, `HTTP_LIMIT` (over `maxReplyBytes`) or
+  `HTTP_INVALID` (a status outside 200 to 599), is answered 500 by the compiled code, so the request is consumed all the
+  same; after `HTTP_CANCELLED` there is nothing to do.
+
+So **a request a serve takes is answered exactly once, by construction**, unless the loop budget or a bounds check
+stops the call it is in ([extending.md](extending.md), recipes 29 and 30): a call they stop returns at once, with no
+reply and no deferred statement run, and its request holds its slot until the server closes, as any request taken and
+not answered does.
+
+**What the compiler knows.** Every route literal of the program, a route's (each hole a `%d`) and an `http_is`'s, is in
+the route table `http_listen` hands the library, and in `Program::webRoutes()`, a route statement's with its
+parameters: each one's name, type, what fills it (`"path"`, `"query"` or `"request"`), its range and its default (a
+`string`'s in `defaultText`), so a
+host can build a control page, or an OpenAPI description, from a program it has not run. And **two route literals one
+request could match are an error** (at the second, with a note at the first), unless one is more specific, Go's
+`ServeMux` rule (<https://pkg.go.dev/net/http#ServeMux>, "Precedence"): a literal segment is more specific than one with
+a hole. The library hands a request to the most specific route that matches, ranking segment by segment from the
+first: a literal one before one with fewer holes before one with more, and those before a `string`'s, which takes any
+segment. So `GET /presets/default`, `GET /presets/{k}` (an `int`) and `GET /presets/{name}` (a `string`) may all be
+routes, each request the first of them that fits; `GET /a/{s}` and `GET /{t}/b` (two strings) may not. So `GET /a/1` and `GET /a/{x}` may both be
+routes (`/a/1` is the first's, `/a/2` the second's), as may `GET /b/{x}-1` and `GET /b/{x}-{y}`; `GET /a/{x}/y` and
+`GET /a/1/{z}` may not (`GET /a/1/y` matches both, and neither is more specific), nor `GET /c/1{x}` and `GET /c/{x}`
+(each a segment of one hole, which the library ranks the same), nor the same route in two serves (which would take
+it?). The same literal in two `http_is` calls stays legal: a program may test a request twice. The check reads a hole
+as any number of digits, so it refuses two routes that would differ only past ten digits.
+
+**What it lowers to**: the builtins, called as a program would call them, and three of the library's own:
+`fminus_web_http_next_in` (or, with a timeout, `fminus_web_http_accept_in`) of the serve's route set, one bit for each of
+its routes in the table, a constant of the program; `fminus_web_http_route`, the route a request was published for,
+which also makes that route's numbers the request's (for `http_arg`, and a `string`'s segment for
+`fminus_web_http_text`); and `fminus_web_http_query_text`, whether the query has a field, and a `string`'s bytes. A loop over the takes, a `switch` on the route, each case its parameters filled and checked and its
+block, each reply a jump to the next take ([extending.md](extending.md), recipe 45).
+
+### The JSON literal
+
+```c
+reply 200, json { "gain": gain, "pitch": pitch, "changes": changes, "on": active };
+reply 200, json { gain, pitch, level, changes };              // a name alone is its own key
+reply 200, json { "state": { "gain": gain }, "taps": taps, "wave": wave };   // an array, an enumeration's name
+reply 200, json (preset);                                     // one value: a module is an object of its fields
+http_response sent = http_post("https://api.example.com/summaries", json { "days": day });   // an array of modules
+file_write("presets/{name}.json", json (preset));             // a file's bytes ([files.md](files.md))
+file_append("log/days.jsonl", json { "day": k, "mean": mean });   // and a newline after them: JSON Lines
+```
+
+**A JSON literal is an argument, never a value**, as a format is: `json { members }`, `json [ values ]` and `json
+(value)` are expressions to the grammar, and the compiler takes one only where something writes it: a `reply` and
+`http_reply_json`, the body of `http_post`, and the bytes of `file_write` and `file_append` ("FMinus has no JSON
+values: a JSON literal is only the body of a reply, http_reply_json, http_post, file_write or file_append" anywhere
+else). No JSON value is ever made: the compiler makes a constant description of the literal (its keys and structure as
+bytes, and each value's shape: [extending.md](extending.md), recipe 51), the values are stored in slots of the
+function's frame, once each, in the order written, and the runtime's JSON writer (`fminus_rt_json_write`, part of
+`FMINUS_JSON`) writes the text where it goes. **It needs the JSON writer**: in a build without `FMINUS_JSON` a JSON
+literal is the error that says so ("a JSON literal needs the JSON writer, which this build of FMinus leaves out
+(FMINUS_JSON=OFF)"), and `json_slice` is the error that names the option.
+
+| A value that is | Is written as |
+|---|---|
+| a `float` or a `double` | **the shortest digits that read back as the same value** (`std::to_chars` with no precision: `0.1f` is `0.1`, `1.0f / 3` is `0.33333334`, `1e20f` is `1e+20`); a NaN or an infinity, which JSON has no number for, `null`. The same in every locale |
+| an `int`, a `bool` | in decimal; `true` or `false` |
+| a `string` (a literal among them) | a JSON string, `"`, `\` and U+0000 to U+001F escaped as RFC 8259 asks (`\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, `\u00XX`), every other byte as it is (no UTF-8 check), so a string from a request, a document or a listing cannot end the literal's string or add a member |
+| **a value of an enumerated type** | **its constant's name**, a JSON string (`"SAW"`: the first constant of that value, as written); a value no constant has, its number. **This replaces the error of recipes 45 to 50** (which said to cast to `int`, and still does what it did: `(int)wave` is a number) |
+| a `char` array | a JSON string of its bytes up to its first 0 (or all of them) |
+| an array of one dimension, of anything below | a JSON array of all its elements |
+| an array of two dimensions | an array of arrays, a row each |
+| a `float2`, `float4`, `float8` | an array of its lanes |
+| **a module**, a value or what a pointer points to, `*p` | an object of its fields, in their order (below) |
+| an array of modules | an array of such objects |
+| `json_slice(array, count)` | the array's first `count` elements, the count clamped to the array's size (`json_slice(day, n)`); or of a pointer, `json_slice(p, n)`, the program vouching for the `n` elements, as it does for `bytes_floats` |
+
+- **A member** is `"key": value`, or a bare name, which is `"name": name`. A key is a string literal (adjacent ones are
+  one), written as a JSON string, escaped as above, and UTF-8 text (a byte that is no part of any is an error). A
+  duplicate key in one object is an error at the second. A value may also be a nested `{ }` or `[ ]`.
+- **A module's object** is its fields in their order, each under its own name or its `[[json::name("...")]]` (two
+  fields under one JSON name are an error), the names `json_read` reads them by ([README.md](../README.md), JSON): the same
+  fields, under the same names, as `json_read`'s table. Left out: a field with `[[json::skip]]`, a pointer, a handle
+  and a poly type (none has a JSON value), and a `when`'s hidden state. A `string` field **is** written (`json_read`
+  leaves one out, since it would point into the document). A field that is a module or an array of them nests.
+- **A module's parameter** is the host's value, which only a method of its module reads (as `cutoff[i]`). So a literal
+  writes one only as **`*this`, in a method of its own module**, each parameter as `cutoff[0]` reads it there: a knob's
+  value, a frozen one's constant, a stream's first sample of the call. A module with a parameter written anywhere else
+  (another instance, a pointer's `*p` outside its methods, a module or an array holding one) is an error that says so,
+  and that `[[json::skip]]` leaves the parameter out ("a JSON literal writes a parameter's value only where a method of
+  its module reads it, as *this: 'cutoff' of 'Synth' is one (leave it out with [[json::skip]])").
+- **Not a value**: a pointer ("write what it points to, *p, or its first elements, json_slice(p, count)"), a handle, a
+  poly type, a bool vector, and an array of any of them, each an error saying what a value may be. `json_slice`
+  anywhere but in a literal is an error, and its elements are never `char`s (a `char` array is a string, written
+  whole).
+- **`json (value)`** is a literal of one value at the top: `json (preset)` an object, `json (taps)` an array, `json
+  (0.5f)` a number.
+- **Nothing is built, and the shape is the program's**: an array's and a module's layout is known when the program is
+  compiled, so the description says where each field is, and the writer walks it, nested 16 deep at most, a module of
+  1024 fields at most, with no allocation, lock or system call (`tests/unit/JsonWriteTest.cpp`, and through the JIT
+  `JsonServeTest.cpp`): a reply's literal of modules is wait-free on the audio thread.
+- **Where it goes**: a **reply**'s literal, `reply status, json ...;` or **`http_reply_json(r, status, json ...)`**
+  (the builtin a reply of a literal is made of, for programs in the `http_is` style, whose result is the library's:
+  `0`, or `HTTP_LIMIT` for a text over the host's `maxReplyBytes`, which a route answers 500), is written straight into
+  the request's own reply buffer (`fminus_web_http_reply_buffer`) and published (`fminus_web_http_reply_written`),
+  wait-free. A **POST**'s, `http_post(url, json ..., ints...)`, is the request's body, sent as `application/json`: the
+  library measures the text (a first pass of the writer, which writes nothing), refuses one over the policy's
+  `maxBodyBytes` (`HTTP_LIMIT`, and nothing is sent), and writes it once into the request's own body, a buffer of
+  exactly its size, before `http_post` returns (it allocates, as `http_post` always has). A **file**'s, `file_write` and
+  `file_append`: [files.md](files.md), "Writing".
 ### The server's builtins
+
+What a `serve` is made of, and what a program may still call itself: a request taken with `http_next` or `http_accept`
+and told apart with `http_is` is answered by hand, as before the statements were.
 
 | Builtin | Does | Effect |
 |---|---|---|
-| `void* http_listen()` | starts the program's server where its host's policy says, with the program's routes, and returns it at once. A program listens once: a second call returns the same server | allocates |
+| `http_server http_listen()` | starts the program's server where its host's policy says, with the program's routes, and returns it at once. A program listens once: a second call returns the same server | allocates |
 | `int http_port(server)` | the port it listens on (1 to 65535), or why it does not: `HTTP_REFUSED` (its host allowed no listen: the default), `HTTP_TRANSPORT` (the address could not be bound: taken, not this machine's, or a sandbox forbids it), `HTTP_CANCELLED` (closed, or the host stopped the program), `HTTP_FAILED` | wait-free |
-| `void* http_next(server)` | the oldest request waiting, now the caller's to answer, or null | wait-free |
-| `void* http_accept(server, timeout_ms)` | the same, waiting up to `timeout_ms` for one (0: not at all; negative: until one comes or the server closes); null at once for a server that does not listen | blocks |
+| `http_request http_next(server)` | the oldest request waiting, now the caller's to answer, or null | wait-free |
+| `http_request http_accept(server, timeout_ms)` | the same, waiting up to `timeout_ms` for one (0: not at all; negative: until one comes or the server closes); null at once for a server that does not listen | blocks |
 | `bool http_is(r, "METHOD /path/%d")` | whether the request is the route's: its method and its path, each `%d` a decimal number of the path; when it is, it keeps the numbers for `http_arg` | wait-free |
 | `int http_arg(r, i)` | the `i`-th number (from 0) the last `http_is` that matched took, or 0 | wait-free |
 | `float http_query_float(r, "name", fallback)`, `int http_query_int(r, "name", fallback)` | a number of the request's query (`?name=0.5`), or the fallback | wait-free |
+| `string http_header(r, "name")` | the request's first header field of that name (a literal, an HTTP token: letters, digits and ``!#$%&'*+-.^_`\|~``, compared without regard to ASCII case), its value without the spaces and tabs around it; empty when there is none. With a token in the server's policy, `Authorization` is the host's and reads empty | wait-free |
+| `string http_path(r)` | the request's path as sent, without its query (`/osc/3/detune`) | wait-free |
+| `string http_query_string(r, "name", fallback)` | the query's first field of that name, its value's bytes as sent (nothing decoded), or the fallback when it has none (`?v=` is present and empty): what a route's `string` parameter of the query reads | wait-free |
 | `int http_size(r)`, `const void* http_body(r)` | the request's body (the client's two builtins, on a request the program received), until it is answered | wait-free |
 | `int http_reply(r, status)` | answers with no body | wait-free |
 | `int http_reply_bytes(r, status, data, bytes, "content/type")` | answers with `bytes` bytes at `data` (copied: the buffer is free again at once) | wait-free |
-| `int http_reply_text(r, status, "content/type", "format", ...)` | answers with text, C's `printf` of the values after the format | wait-free |
-| `void http_close(server)` | stops listening and closes every connection: a request the program holds is given up, every thread in `http_accept` woken (null), the port `HTTP_CANCELLED` | allocates |
+| `int http_reply_text(r, status, "content/type", "format", ...)` | answers with text, C's `printf` of the values after the format (`%s` a `string`'s bytes) | wait-free |
+| `int http_reply_json(r, status, json ...)` | answers with a JSON literal's text, written in the request's own buffer, as `application/json` ([The JSON literal](#the-json-literal)): what `reply status, json ...;` is | wait-free |
+| `void http_close(server)` | stops listening and closes every connection: a request the program holds is given up, every thread in `http_accept` woken (null), the port `HTTP_CANCELLED`; the replies the program has answered are sent first, for a quarter of a second at most ([below](#the-servers-threads-and-lifetime)) | allocates |
 
 - **A request is the caller's from `http_next` or `http_accept` until its reply**, and only the thread that took it
   should read or answer it (a program that hands it to another thread orders the two itself). One reply each: the
-  handle is dead after it, as a client's request is after `http_close`. Until then its method, path, query and body
-  never change.
+  handle is dead after it, as a client's request is after `http_close`. Until then its method, path, query, header
+  fields and body never change, and **a `string` read from it (a parameter, `http_path`, `http_header`,
+  `http_query_string`) is valid until its reply**, after which its bytes are the next request's: the compiler does not
+  check it, as it does not check a body's pointer. Its text is bytes as sent: nothing is decoded, and no encoding is
+  checked.
 - **A reply** is a status of 200 to 599 (204 and 304 with no body) and returns 0 once it is the library's to send;
   or, having sent nothing, `HTTP_LIMIT` (the body is over the policy's `maxReplyBytes`: the request is still the
   caller's), `HTTP_INVALID` (not a request the caller holds, or a status, a size or a content type that cannot be:
   still the caller's), or `HTTP_CANCELLED` (the library gave up on it meanwhile: its client left, it timed out and was
-  answered 503, or the server closed; the handle is dead). The content type is a literal of printable ASCII, at most 255
+  answered 503, or the server closed; the handle is dead). A reply that returned 0 is sent, a close right after it
+  included. The content type is a literal of printable ASCII, at most 255
   bytes; empty means none for `http_reply`, `application/octet-stream` for bytes and `text/plain; charset=utf-8` for
   text. A `HEAD` request's reply keeps its `Content-Length` and drops its body.
 - **A query's number** is the value of the first field of that name, compared byte for byte (nothing is decoded) and
@@ -467,9 +798,12 @@ with `FMINUS_WEB`.
   range give the fallback, so nothing a stranger types into a URL puts a NaN into a filter's state. An int is an
   optional `-` and digits whose value an `int` holds (`7.0` is not one). The range is the program's to check: a gain
   of 7 is a number.
-- **Handles know what they are.** A request made, a request received and a server are all `void*`, and each carries
-  its kind: a builtin given the wrong one does nothing and says `HTTP_INVALID` (or 0, or null). `http_close` of a
-  request the program received does nothing; `http_status` and `http_wait` of a server say `HTTP_INVALID`.
+- **Handles know what they are.** A request made, a request received and a server are an `http_response`, an
+  `http_request` and an `http_server`, and the compiler refuses one where another is wanted (`http_close` takes a
+  request made or a server, `http_size` and `http_body` a request made or received). One that reaches a builtin as a
+  `void*`, which converts to any, is checked again in the library, as it always was: each carries its kind, and a
+  builtin given the wrong one does nothing and says `HTTP_INVALID` (or 0, or null). `http_close` of a request the
+  program received does nothing; `http_status` and `http_wait` of a server say `HTTP_INVALID`.
 - **The effects** ([extending.md](extending.md), recipe 11): `http_listen` and `http_close` are refused in a
   `[[clang::nonallocating]]` function and in a `[[clang::nonblocking]]` one; `http_accept` blocks (a lock and a
   condition variable), refused in a nonblocking function and allowed in a nonallocating one; everything else is
@@ -520,10 +854,12 @@ nothing); a program bounds it itself (`http_arg(r, 0) & 15`, or a 400).
 | `%d` | an `int` or a `bool` | the value in decimal |
 | `%g` | a `float` or a `double` (a float as `printf` promotes one) | six significant digits, as `printf` writes them |
 | `%.Ng`, N from 1 to 17 | the same | N significant digits: `%.9g` reads back as the same float, `%.17g` as the same double |
+| `%s` | a `string` (a literal among them) | its bytes as they are (nothing escaped: a JSON literal escapes) |
 | `%%` | nothing | `%` |
 
 Errors: `format specifies type 'int' but the argument has type 'float'`, `format specifies type 'double' but the
-argument has type 'int'`, `more '%' conversions than data arguments`, `data argument not used by format string`,
+argument has type 'int'`, `format specifies type 'string' but the argument has type 'int'`, `more '%' conversions than
+data arguments`, `data argument not used by format string`,
 `invalid conversion specifier 'f'`, and FMinus's own `a reply's %.Ng takes a precision N of 1 to 17`. The text is
 written by `std::to_chars` into the request's own buffer, the same in every locale, with no allocation. As in C, a NaN
 is `nan` and an infinity `inf`, which JSON cannot hold: a program that might have one says so itself. Arrays of numbers
@@ -569,21 +905,26 @@ a `process` that serves can take `maxPending` requests in one block (16 by defau
 program that would rather spread them takes a few a block (`for (int i = 0; i < 4; ++i)`), and the rest wait for the
 next.
 
-**What it buys and costs.** A reply's body is bounded by its slot's buffer: a larger one is refused (`HTTP_LIMIT`),
-and nothing on the audio thread ever allocates to answer. **A request taken must be answered**, even
-if only with `http_reply(r, 404)`. At `replyTimeoutMs` the library answers its client 503 for the program, and the
-program's reply, whenever it comes, returns `HTTP_CANCELLED`; but the slot stays the program's until that reply, since
-the program may still be writing into its buffer. A request never answered keeps its slot until the server closes, and
-`maxPending` of them leave every later request a 503 (`tests/unit/WebServerTest.cpp` pins this). A program that
-must parse what it is sent with `json_parse`, which allocates, takes those requests on a thread of its host's with
-`http_accept` instead, the server's one builtin that blocks.
+**What it buys and costs.** A reply's body is bounded by its slot's buffer: a larger one is refused (`HTTP_LIMIT`), and
+nothing on the audio thread ever allocates to answer. **A request taken must be answered**: a `serve` answers each of
+its own exactly once, by construction (unless the loop budget or a bounds check stops the call it is in); one taken with
+`http_next` or `http_accept` is the program's to answer, even if only with `http_reply(r, 404)`. At `replyTimeoutMs` the
+library answers its client 503 for the program, and the program's reply, whenever it comes, returns `HTTP_CANCELLED`;
+but the slot stays the program's until that reply, since the program may still be writing into its buffer. A request
+never answered keeps its slot until the server closes, and `maxPending` of them leave every later request a 503
+(`tests/unit/WebServerTest.cpp` pins this). A program that must parse what it is sent with `json_parse`, which
+allocates, takes those requests on a thread of its host's with `http_accept` instead, the server's one builtin that
+blocks.
 
 That the wait-free builtins are wait-free in the library's code is proved, not asserted
 (`tests/unit/WebServerTest.cpp`): `HeapCalls` counts no allocation in `http_next`, `http_port`, `http_is`, `http_arg`,
 the query's reads, `http_size`, `http_body` and each reply, and a child process under seccomp's strict mode, in which
-any system call but `read`, `write` and `exit` kills it, makes the same calls and exits with the expected results.
+any system call but `read`, `write` and `exit` kills it, makes the same calls and sends back the expected results
+(`tests/unit/StrictMode.h`, which every such proof uses; [testing.md](testing.md), "A wait-free proof").
 `tests/unit/WebServeTest.cpp` makes the same proof of a `[[clang::nonblocking]]` handler compiled by the JIT, whose
-builtins take, read and answer the request through the definitions the JIT gives them (Linux).
+builtins take, read and answer the request through the definitions the JIT gives them, and `tests/unit/ServeTest.cpp`
+of a `serve` in a nonblocking method: its takes by route set, its parameters' reads and checks, each form of reply and
+a JSON literal (Linux).
 
 ### What the host gives the server
 
@@ -641,7 +982,9 @@ whether or not it listens; in a build without the server it is not read.
   `HTTP_REFUSED`), as it may reach and not listen.
 - **`Program::stopWeb()`** closes the server too: its sockets and every connection, every request the program has not
   answered given up (its reply `HTTP_CANCELLED`), every thread in `http_accept` woken (null), and `http_port`
-  `HTTP_CANCELLED` from then on; an `http_listen` after it never listens. `~Program` stops, then frees it.
+  `HTTP_CANCELLED` from then on; an `http_listen` after it never listens. The replies the program answered before it
+  are sent first, so it may take a quarter of a second more when a client does not read its reply (below). `~Program`
+  stops, then frees it.
 
 ### What a request meets
 
@@ -774,7 +1117,7 @@ Neither has a host, so the person who runs them says where the program may liste
   server.token has 5 characters (16 to 256)`).
 
   ```bash
-  build-web/bin/fminus examples/remote/remote.fm --run serve 600 --web-listen localhost:8080 --web-root examples/remote/page
+  build-web/bin/fminus examples/remote/remote.fm --run run 600 --web-listen localhost:8080 --web-root examples/remote/page
   ```
 
 - **An executable** (`--emit exe`) of a program that calls `http_listen` reads `FMINUS_WEB_LISTEN` when it starts
@@ -808,13 +1151,28 @@ path after the listing, so there the root must be writable by no one else while 
   wakes it.
 - **Binding happens in `http_listen`**, on the calling thread, before the sockets are handed to the I/O thread: so
   `http_port` is final when `http_listen` returns.
-- **Closing** (`http_close`, `Program::stopWeb()`, `~Program`) detaches the server from the I/O thread, which closes
-  every socket, then wakes every thread in `http_accept`. The handles stay safe to use (each says closed, or
-  `HTTP_CANCELLED`) until the `Program` is destroyed, which waits for every thread in `http_accept` to have left. A
-  thread of the host's in `http_accept(-1)` is woken by `stopWeb()`: the host calls it, joins the thread, and then
-  destroys the `Program`.
-- **A reply answered just before the end** (an executable's `main` returning right after its last `http_reply`, a
-  `Program` destroyed) may never be sent: closing does not wait to flush.
+- **Closing** (`http_close`, `Program::stopWeb()`, `~Program`) stops listening at once, gives up every request the
+  program holds and has not answered (its reply, whenever it comes, `HTTP_CANCELLED`) and every one it has not taken
+  (its client gets nothing, the connection closed), and wakes every thread in `http_accept`. Then it **sends the
+  replies the program handed over before it**: each one whose reply returned 0 goes out whole, as the last response on
+  its connection (`Connection: close`), and so does a response already going out (a reply, a refusal, a file); then
+  the server lets go of its sockets. The I/O thread writes each into its socket as the close begins, never waiting
+  on a client, and the closing call waits for them to leave: a client that reads has its reply at once, and **a client
+  that does not read holds the close a quarter of a second at most**, after which its connection is closed with as
+  much of the reply as its socket took. `stopWeb()` and `~Program` wake every thread in `http_wait` and at a
+  `within`'s end meanwhile, not after. The handles stay safe to use (each says closed, or `HTTP_CANCELLED`) until the `Program` is destroyed, which
+  waits for every thread in `http_accept` to have left. A thread of the host's in `http_accept(-1)` is woken by
+  `stopWeb()`: the host calls it, joins the thread, and then destroys the `Program`.
+- **So a reply answered just before the end is sent**: an executable's `main` returning right after its last
+  `http_reply`, a run's last route followed by its `defer http_close(server)`, a `Program` destroyed or stopped as soon
+  as its loader returns. (Until 2026-11-13 closing closed every connection at once, and such a reply was lost: the
+  client saw an empty response.) Which comes first, a reply or the close, is decided by one atomic operation on the
+  request: a reply that returned 0 is sent, one that returned `HTTP_CANCELLED` was too late, and nothing is sent twice.
+
+*Why a quarter of a second, and not a setting:* the bound is the host's own wait, in `stopWeb()`, `~Program` or a
+loader's `http_close`, and only a client that does not read (or a network too slow for a reply of `maxReplyBytes`)
+ever meets it, since every reply is written into its socket as the close begins. No host knows its clients' speed to
+set it better, and a constant keeps the policy and its checks as they were.
 
 **Determinism.** A program that takes requests while it plays depends on when they arrive, as it depends on when a key
 is pressed: the block a change lands in is the network's. [Determinism](#determinism-and-offline-rendering) above holds
@@ -830,13 +1188,15 @@ for the server as for the client. An offline bounce has no server: compiled with
 | `src/web/Roots*.cpp` | the system's root certificates, a file a platform |
 | `src/web/Main.cpp` | an executable's context, from `FMINUS_WEB_ALLOW` (and, with the server, `FMINUS_WEB_LISTEN`, `_TOKEN`, `_HOSTS`, `_ROOT`, `_OPEN`) |
 | `src/web/Handle.h` | the kind every handle carries first (a request made, a request received, a server), which every C function reads before anything else |
-| `src/web/Server.h`, `Server.cpp` | the server (`FMINUS_WEB_SERVER`): routes, the slots, each connection's state machine on llhttp, the nine rules, static files, the replies' formatting; driven by the I/O thread of `Web.cpp` |
+| `src/web/Server.h`, `Server.cpp` | the server (`FMINUS_WEB_SERVER`): routes, the slots, each connection's state machine on llhttp, the nine rules, static files, the replies' formatting, closing's drain (`Servers::drain`); driven by the I/O thread of `Web.cpp` |
 | `src/web/ServerPolicy.cpp` | the server's policy: the listen forms, the token, hosts and files, the limits; what counts as loopback, the browsers' bad ports, a servable path, an acceptable `Host` and `Origin` |
 | `src/web/ServerRoot.cpp` | `readServerRoot`: a directory's files as static content, for `--web-root` and `FMINUS_WEB_ROOT` |
 | `src/web/Sockets.h`, `SocketsPosix.cpp`, `SocketsWindows.cpp` | the server's sockets, the one part that differs between systems (only the Linux path built and run) |
 | `src/web/WebSymbols.def` | every function generated code calls, which the JIT defines by address |
 | `src/ir/Calls.cpp` | the builtins' table, with `Feature::Web`, their effects, and what each library function touches (`kRuntimeFacts`) |
 | `src/ir/Web.cpp` | a URL's checks, `webRequests()`'s metadata, the module's context global, the status codes' names |
+| `src/ir/Within.cpp` | a `within` block: its milliseconds, the scope begun, and its end at each way out (`defer`'s mechanism, `Statements.cpp`); its effects in `Effects.cpp` |
+| `src/opt/EarlyReturn.cpp` | the loop budget's and the bounds checks' way out of a function that begins a scope: the thread's scopes abandoned first |
 | `src/ir/WebServer.cpp` | a route literal's checks, `webRoutes()`'s metadata and the program's route table, a query's name, a reply's format and its values |
 | `src/api/FMinus.cpp` | `Options::web` (and `.server`), the `Program`'s context, `webRequests()`, `webRoutes()`, `webPort()`, `stopWeb()` |
 | `src/support/Aot.cpp` | an executable's context in its C `main`, and the libraries it links |
@@ -845,12 +1205,18 @@ for the server as for the client. An offline bounce has no server: compiled with
 | `Scripts/pin-web.sh` | the pin lines for new releases of all three (`Scripts/pin-web.sh 8.23.0 4.1.1 9.4.3`): libcurl's tarball and llhttp's tag archive downloaded and hashed, Mbed TLS's digest read from its GitHub release. Bump them on their security releases |
 | `tests/unit/WebTest.cpp` | the library against a loopback server of its own (HTTP and HTTPS, with a certificate authority it makes), and programs fetching through the JIT and as executables |
 | `tests/unit/HttpTest.cpp` | the builtins in the compiler, in every build |
-| `tests/unit/WebServerTest.cpp` | the server at its own level, from C++, before any builtin: the policy and its classifiers, each rule from a raw socket and from the library's client, keep-alive, limits and timeouts, dropped clients, many threads taking, closing with threads waiting, and the wait-free proof (`HeapCalls`, and seccomp's strict mode) |
+| `tests/unit/WebServerTest.cpp` | the server at its own level, from C++, before any builtin: the policy and its classifiers, each rule from a raw socket and from the library's client, keep-alive, limits and timeouts, dropped clients, many threads taking, closing with threads waiting, closing's replies sent (whole, beside the requests given up, and a client that does not read held to the bound, by `http_close`, `stop()` and `~Context`), and the wait-free proof (`HeapCalls`, and seccomp's strict mode) |
 | `tests/unit/HttpServerTest.cpp` | the server's builtins in the compiler, in every build: effects, the off build's errors, the route, format and name checks at their columns, the route table, the declarations' attributes, `webRoutes()`, the policy checked by `compile()` |
 | `tests/unit/WebServeTest.cpp` | programs that serve, through the JIT (an audio thread taking requests between blocks, a loader in `http_accept`, `stopWeb()`) and as an executable with its environment; `readServerRoot`, and a directory swapped for a link while it reads |
+| `tests/unit/WithinTest.cpp` | `within` through the JIT against a loopback server of its own (the promise, the deadline, nesting, each way out, `stopWeb()`, a reply and a serve inside one, a URL with holes, the report's script), a block the loop budget or a bounds check stops, the library's abandon and its wait-free proof (`HeapCalls`, and seccomp's strict mode), and the errors |
 | `tests/lit/fminus/web*.fm` | the IR, the errors, the driver; `web-off.fm` in a build without the library, `web-server-off.fm` in one without the server |
-| `examples/fetch/` | the wavetable example's pack fetched from a server its host allows |
+| `tests/lit/fminus/within*.fm` | a `within`'s IR (its end at each way out, the abandon on the passes' ways out), its errors, and `within-off.fm` in a build without the library |
+| `tests/unit/HoleTest.cpp`, `tests/lit/fminus/holes*.fm` | a URL's holes: each mistake an error at its byte, `webRequests()`'s `*`, and a string percent-encoded byte by byte, sent by one program to another that serves on loopback |
+| `tests/unit/JsonServeTest.cpp`, `tests/lit/fminus/json-literal-web.fm` | a JSON literal of modules, arrays, enumerations and slices in a reply and `http_reply_json`, its `HTTP_LIMIT`, the wait-free proof of a reply's module, and the research's data work: days fetched at once, written with `file_write` and posted with `http_post` to a loopback server of the test's own, read back there with `json_read`; a POST's literal over `maxBodyBytes` |
+| `tests/unit/WebServerTest.cpp`'s last case | `fminus_web_http_post_json` from C++: the text measured, written into the request's body and sent as `application/json`, with and without strings in its URL, its refusals and its limit |
+| `examples/fetch/` | the wavetable example's pack fetched from a server its host allows; packs at once in a `within`; a table swapped in by a `when` |
 | `examples/remote/` | a synthesiser a browser controls: its page served by the library, its requests taken in `process` |
+| `examples/presets/` | named presets kept over HTTP as files: a route's `string` parameter, a file's name with a hole, a body read into a module with `json_read` and the module written back with `json (preset)` |
 
 Recipe 41 in [extending.md](extending.md) walks through the client as a change to the compiler, and recipe 42 the
 server.
@@ -864,19 +1230,60 @@ server.
   own tests also ran under GCC's ThreadSanitizer and AddressSanitizer, and so did `stop()` racing `http_close`, waiting
   threads and new requests, in a harness outside the tree (libcurl and Mbed TLS uninstrumented).
 - **The server, on Linux x86-64**: built and tested in a release tree with `FMINUS_WEB=ON` and `FMINUS_WEB_SERVER=ON`,
-  in one with the client alone (no llhttp, listen or root symbols in `libfminus_web.a`, and every server builtin the
-  off build's error), and in the default tree. Every socket a test binds is on 127.0.0.1, and every connection is made
-  to it (checked with strace over the server's tests, the lit tests and `example-remote --check`). The engine's sources,
+  in one with the client alone (no llhttp, listen or root symbols in `libfminus_web.a`, and every server builtin the off
+  build's error), and in the default tree. Every socket a test binds is on 127.0.0.1, and every connection is made to it
+  (checked with strace over the server's tests, the lit tests and `example-remote --check`). The engine's sources,
   llhttp's three files and its test also ran under GCC's AddressSanitizer with UndefinedBehaviorSanitizer and under
-  ThreadSanitizer, outside the presets, with a race harness (threads taking and answering while clients come and go)
-  and a mutation fuzzer (100,000 damaged requests: no report, and the server still answered a valid request after);
+  ThreadSanitizer, outside the presets, with a race harness (threads taking and answering while clients come and go) and
+  a mutation fuzzer (100,000 damaged requests: no report, and the server still answered a valid request after);
   ThreadSanitizer found one real bug, now fixed (a thread leaving `http_accept` early was not counted, so destroying the
   context could free the server under it). The wait-free builtins are proved so in the library's code and in a JIT'd
-  handler's (`HeapCalls`, and seccomp's strict mode). `SocketsPosix.cpp`'s non-Linux path (`fcntl` after `socket`,
-  plain `accept`, `MSG_NOSIGNAL` where defined) was compiled here with `__linux__` undefined and passed the server's
-  tests, a client that closes before its reply among them; the path as it was died of `SIGPIPE` there. The server's
-  and the client's tests passed twenty times over in a network namespace with loopback alone. `examples/remote/` was
-  driven by hand through the driver with `curl` on loopback.
+  handler's (`HeapCalls`, and seccomp's strict mode). `SocketsPosix.cpp`'s non-Linux path (`fcntl` after `socket`, plain
+  `accept`, `MSG_NOSIGNAL` where defined) was compiled here with `__linux__` undefined and passed the server's tests, a
+  client that closes before its reply among them; the path as it was died of `SIGPIPE` there. The server's and the
+  client's tests passed twenty times over in a network namespace with loopback alone. `examples/remote/` was driven by
+  hand through the driver with `curl` on loopback. `serve`, `route` and `reply` (2026-11-13): built and tested in the
+  release tree with the server and in the default tree, not in one with the client alone; their wait-free proof is of a
+  JIT'd serve (`ServeTest.cpp`); `examples/remote/` through them was driven again through the driver with `curl` on
+  loopback; nothing of them ran under a sanitizer. `within` (2026-11-13): built and tested in the release tree with the
+  library and its server and in the default tree, not in one with the client alone; its tests (`WithinTest.cpp`, the
+  library's and the JIT's, against their own loopback server) and the library's other tests ran under GCC's
+  AddressSanitizer with UndefinedBehaviorSanitizer and LeakSanitizer (every case, no report; `HeapCalls` counts nothing
+  there, so the abandon's allocation proof only ran in the normal build, its seccomp half under both) and under
+  ThreadSanitizer (every case but the five fork-based proofs, which TSan's own thread keeps from exiting: no report,
+  three times over), outside the presets, with the compiler's libraries uninstrumented. Holes, a route's `string`
+  parameters, a request's text, a JSON literal through the runtime's writer and `%s` (2026-11-13): built and tested in
+  the same two trees, not in one with the client alone nor in one without `FMINUS_JSON` (whose errors are written and
+  not run); the wait-free proof of a JIT'd serve covers a `string` parameter of the path and of the query,
+  `http_header`, `http_path`, `http_query_string`, a JSON literal written in place and `%s`;
+  `fminus_web_http_reply_text_s` and the formatter without `%r`, `%R` and `%b` ran under GCC's AddressSanitizer with
+  UndefinedBehaviorSanitizer and ThreadSanitizer with the server's tests; `examples/presets/` was driven by its own
+  check, on loopback. A JSON literal of arrays, vectors, enumerations and modules, `json (value)`, `json_slice`,
+  `http_reply_json` and a POST's literal (2026-11-13): built and tested in the same two trees, not in one with the
+  client alone nor in one without `FMINUS_JSON`; the wait-free proof of a JIT'd reply of a module, an array of modules,
+  a slice and an enumeration (`JsonServeTest.cpp`); `fminus_web_http_post_json` from C++ and through the JIT, against
+  loopback servers of the tests' own, and with the server's and the client's other tests under GCC's AddressSanitizer
+  with UndefinedBehaviorSanitizer (every case) and ThreadSanitizer (every case but the fork-based proofs), the JIT's
+  tests compiled by clang uninstrumented beside them. Closing's drain (2026-11-13): built and tested in the release
+  tree with the server and in the default tree, not in one with the client alone; its tests (`WebServerTest.cpp`'s,
+  closing by `http_close`, `stop()` and `~Context`; `ServeTest.cpp`'s, by a program's deferred `http_close`,
+  `stopWeb()` and `~Program`; the executable's last reply in `WebServeTest.cpp`; `example-remote --check`'s `run()`)
+  with the server's, the client's, `within`'s and `serve`'s other tests ran under GCC's ThreadSanitizer (every case but
+  the six fork-based proofs, three times over, and the lifetime cases twenty times more) and AddressSanitizer with
+  UndefinedBehaviorSanitizer and LeakSanitizer (every case), no report, the JIT's programs and the compiler's libraries
+  uninstrumented; and the report's reproduction, `curl` against the driver on loopback, gives 204 where it gave an empty
+  reply. The drain is in the portable part of `Server.cpp`: the sockets' code is unchanged.
+- **The wait-free proofs under both sanitizers** (2026-11-13): every proof's child under seccomp's strict mode is now
+  `tests/unit/StrictMode.h`'s, which reads the child's result and then ends the child, never waiting for it to end by
+  itself, so the fork-based proofs that ThreadSanitizer's own thread kept from exiting (above) run there too. The 18
+  proof cases (`WebServerTest.cpp`'s three, `WebServeTest.cpp`'s, `ServeTest.cpp`'s, `JsonServeTest.cpp`'s,
+  `WithinTest.cpp`'s, and those of the JSON, XML, document-text and file tests) and the helper's own six
+  (`StrictModeTest.cpp`), each in a process of its own as ctest runs a case, ran 20 times under GCC 13's
+  ThreadSanitizer (480 runs, every one passed, no report, none longer than a second) and once under AddressSanitizer
+  with UndefinedBehaviorSanitizer (no report), outside the presets, with the web library, llhttp and the runtime's own
+  sources but `Math.cpp` instrumented, and the test files compiled by g++ from a copy whose `Compile.h` spells `float2`
+  and `float4` as GCC's vector types. The proof of `xml_text` as it was, built the same way, still stalled there (its
+  parent in `waitpid`, its child a zombie leader beside the sanitizer's thread), stopped after 60 seconds.
 - **Not run anywhere yet:** macOS and Windows (their root-certificate loaders, Schannel, the frameworks and system
   libraries an executable links, and the server's sockets there: `SocketsPosix.cpp` with macOS's `SO_NOSIGPIPE`,
   `SocketsWindows.cpp`, curl's handling of extra descriptors on Windows, llhttp built by clang-cl, whose header marks
@@ -902,8 +1309,11 @@ server.
   the user's problem first, and Windows would need Mbed TLS there), so the LAN is plain HTTP and the token crosses it
   in the clear; **a stream from the server** (server-sent events, WebSockets): a page polls; **chunked request
   bodies**, `Expect: 100-continue` (417), pipelining beyond one request at a time, HTTP/2, compression and ranges;
-  **other origins** (CORS): never; **reading a request's headers or cookies**, templating: FMinus has no strings, by
-  design; **a JSON writer** (`%g` in a reply's format, and arrays as bytes); **an "embed this file" builtin**: static
+  **other origins** (CORS): never; **cookies** (a header's text is read, `http_header`, and nothing more of them),
+  templating: nothing builds text, by design (a JSON literal and a format write it where it goes); **a JSON value**
+  (a literal is an argument only: no document is built, edited or written whole from one), and **a literal's array of
+  a length known only when it runs** beyond the first elements of one the program has (`json_slice`); **an "embed this
+  file" builtin**: static
   content is the host's; **a server of the host's own** with a ready-made parameter surface: an example host shows the
   way first (`examples/remote/`); and the Python package's binding of it.
 - **A disk cache and an `offline` policy** (the report's §8): a host that wants either keeps its own, and hands the

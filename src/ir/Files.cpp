@@ -10,6 +10,10 @@
 //   FMinus is built buys: a type outside FMINUS_FILES_TYPES, an absolute name in a build without FMINUS_FILES_ANYWHERE,
 //   and an absolute name written, are errors too. The runtime checks the name again in full once its %d are filled
 //   in: this check is the courtesy, that one the rule.
+// - A name may name its values by holes, `{name}` (Strings.cpp), an int or a string, in any segment but the folder and
+//   in no extension. A string joins the segment it is written in, and the runtime checks the name filled in by the
+//   rules this file checks a literal's segments by (a '/' or a '*' from the string, a leading '.', a device's name,
+//   the lengths): one that breaks a rule is FILE_INVALID, a status the program reads (runtime/Files.cpp).
 // - Each call's name is recorded in the module's named metadata "fminus.files" (ir::FileUse, CodeGen.h): the host reads
 //   them all before it runs anything (Program::files), since every name is a literal.
 // - The program's file context is one global of its module, ir::kFilesContextSymbol, a pointer the host sets (null: no
@@ -167,8 +171,9 @@ namespace fminus::ir::detail
             return number == "\xc2\xb9" || number == "\xc2\xb2" || number == "\xc2\xb3";
         }
 
-        // A piece of a literal: the text a name's rules read, each %d a digit ('0') and %% a '%', and for each of its
-        // bytes the offset in the literal of the byte it stands for, and whether it is a %d's.
+        // A piece of a literal: the text a name's rules read, each %d a digit ('0'), each %s (a string's hole) a letter
+        // ('a': a string is checked when it is filled in) and %% a '%', and for each of its bytes the offset in the
+        // literal of the byte it stands for, and whether it is a place's.
         struct Spelled
         {
             std::string text;
@@ -181,9 +186,11 @@ namespace fminus::ir::detail
             Spelled out;
             for (std::size_t i = 0; i < literal.size(); ++i)
             {
-                const bool place = literal[i] == '%' && i + 1 < literal.size() && literal[i + 1] == 'd';
+                const bool number = literal[i] == '%' && i + 1 < literal.size() && literal[i + 1] == 'd';
+                const bool text = literal[i] == '%' && i + 1 < literal.size() && literal[i + 1] == 's';
+                const bool place = number || text;
                 const bool percent = literal[i] == '%' && i + 1 < literal.size() && literal[i + 1] == '%';
-                out.text += place ? '0' : literal[i];
+                out.text += number ? '0' : text ? 'a' : literal[i];
                 out.offsets.push_back(i);
                 out.places.push_back(place);
                 if (place || percent)
@@ -262,6 +269,8 @@ namespace fminus::ir::detail
             const auto [begin, end] = segments[0];
             for (std::size_t k = begin; k < end; ++k)
             {
+                if (rules.holes && name.places[k])
+                    return fail(at(k), "a file's folder is its literal's own, a name its host maps: no hole in it");
                 if (!letterOrDigit(text[k]) && text[k] != '_' && text[k] != '-')
                     return fail(at(k), "character '" + shown(text[k]) + "' is not allowed in a folder's name: ASCII "
                                        "letters, digits, '_' and '-'");
@@ -321,9 +330,10 @@ namespace fminus::ir::detail
                 }
                 return false;
             }();
+            const std::string_view source = literal.substr(at(begin), at(begin + base.size()) - at(begin));
             if (deviceName(base))
-                return fail(at(begin), "'" + shownText(literal.substr(at(begin), at(begin + base.size()) - at(begin)))
-                                           + "' is a device name of Windows" + (placed ? " when its %d is a digit" : "")
+                return fail(at(begin), (rules.holes ? std::string("this segment") : "'" + shownText(source) + "'")
+                                           + " is a device name of Windows" + (placed ? " when its %d is a digit" : "")
                                            + ": no segment of a file's name may be one, in any letter case, with or "
                                              "without an extension");
         }
@@ -378,7 +388,8 @@ namespace fminus::ir::detail
     }
 
     // A name, or a listing's pattern: its errors (scanFileName), the first of them at its byte, and then false.
-    bool Lowering::checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin)
+    bool Lowering::checkFileName(const ast::StringExpr& literal, SourceLocation where, std::string_view builtin,
+                                 bool holes)
     {
         FileNameRules rules;
         rules.pattern = builtin == "file_list";
@@ -387,25 +398,35 @@ namespace fminus::ir::detail
         const std::string triple = targetTriple_.empty() ? llvm::sys::getProcessTriple() : targetTriple_;
         rules.windows = llvm::Triple(triple).isOSWindows();
         rules.types = FMINUS_FILES_TYPES;
+        rules.holes = holes;
         const std::vector<FormatScan::Error> errors = scanFileName(literal.value, rules);
         if (errors.empty())
             return true;
-        const FormatScan::Error& first = errors.front();
+        FormatScan::Error first = errors.front();
+        if (holes)   // its places are holes: the rules' words about a %d said of a hole
+        {
+            if (const std::size_t at = first.message.find("its %d are"); at != std::string::npos)
+                first.message.replace(at, 10, "its holes are");
+            for (std::size_t at = first.message.find("%d"); at != std::string::npos; at = first.message.find("%d"))
+                first.message.replace(at, 2, "hole");
+        }
         error(first.offset < literal.at.size() ? literal.at[first.offset] : where, first.message);
         return false;
     }
 
-    // The call's operation and its name as a pattern, each %d a "*" and %% a "%", where it is: the module's named
-    // metadata, which ir::files reads.
+    // The call's operation and its name as a pattern, each %d (and each hole: a %d or a %s) a "*" and %% a "%", where
+    // it is: the module's named metadata, which ir::files reads.
     void Lowering::recordFileUse(SourceLocation location, std::string_view operation, const ast::StringExpr& literal)
     {
+        if (relowering_ > 0)
+            return;   // a deferred statement lowered again: recorded the first time (Statements.cpp)
         std::string pattern;
         const std::string& text = literal.value;
         for (std::size_t i = 0; i < text.size(); ++i)
         {
-            if (text[i] == '%' && i + 1 < text.size())   // the format is checked: %d or %%
+            if (text[i] == '%' && i + 1 < text.size())   // the format is checked: %d, %s (a hole's) or %%
             {
-                pattern += text[i + 1] == 'd' ? '*' : '%';
+                pattern += text[i + 1] == '%' ? '%' : '*';
                 ++i;
             }
             else

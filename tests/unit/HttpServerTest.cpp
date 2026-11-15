@@ -226,7 +226,8 @@ TEST_CASE("a route literal is a method, one space and a path the server serves, 
              "'.', '_', '~' and %d\n");
 }
 
-TEST_CASE("a reply's format is printf's %d, %g, %.Ng and %%, checked as clang checks printf's", "[codegen][web][server]")
+TEST_CASE("a reply's format is printf's %d, %g, %.Ng, %s and %%, checked as clang checks printf's",
+          "[codegen][web][server]")
 {
     using fminus::ir::detail::scanReplyFormat;
     const auto places = [](std::string_view format) {
@@ -234,10 +235,11 @@ TEST_CASE("a reply's format is printf's %d, %g, %.Ng and %%, checked as clang ch
         CHECK(scan.errors.empty());
         std::string kinds;
         for (const auto& place : scan.places)
-            kinds += place.real ? 'g' : 'd';
+            kinds += place.text ? 's' : place.real ? 'g' : 'd';
         return kinds;
     };
     CHECK(places("{\"gain\":%g,\"n\":%d,\"x\":%.9g,\"y\":%.17g,\"z\":%.1g} 100%%") == "gdggg");
+    CHECK(places("%s=%d %s%%") == "sds");
     CHECK(places("%.05g") == "g");
     CHECK(places("no places") == "");
     const auto error = [](std::string_view format) {
@@ -255,12 +257,14 @@ TEST_CASE("a reply's format is printf's %d, %g, %.Ng and %%, checked as clang ch
     CHECK(error("%-d") == std::pair{std::size_t{1}, std::string("invalid conversion specifier '-d'")});
     CHECK(error("%lg") == std::pair{std::size_t{1}, std::string("invalid conversion specifier 'lg'")});
     CHECK(error("%.3f") == std::pair{std::size_t{1}, std::string("invalid conversion specifier '.3f'")});
+    CHECK(error("%5s") == std::pair{std::size_t{1}, std::string("invalid conversion specifier '5s'")});
+    CHECK(error("%ls") == std::pair{std::size_t{1}, std::string("invalid conversion specifier 'ls'")});
     CHECK(error("%y") == std::pair{std::size_t{1}, std::string("invalid conversion specifier 'y'")});
     CHECK(error("50%") == std::pair{std::size_t{2}, std::string("incomplete format specifier")});
     if (FMINUS_HAS_WEB_SERVER == 0)
         return;
     const std::string note = "note: a reply's format takes %d, an int; %g and %.Ng (N from 1 to 17), a float or a "
-                             "double; and %%, a percent sign\n";
+                             "double; %s, a string; and %%, a percent sign\n";
     CHECK(errorsOf("int a(void* r, float x) { return http_reply_text(r, 200, \"\", \"%d\", x); }\n")
           == "test.fm:1:68: error: format specifies type 'int' but the argument has type 'float'\n");
     CHECK(errorsOf("int b(void* r, int x) { return http_reply_text(r, 200, \"\", \"%g\", x); }\n")
@@ -273,6 +277,11 @@ TEST_CASE("a reply's format is printf's %d, %g, %.Ng and %%, checked as clang ch
           == "test.fm:1:65: error: more '%' conversions than data arguments\n");
     CHECK(errorsOf("int f(void* r, int x) { return http_reply_text(r, 200, \"\", \"%d\", x, x); }\n")
           == "test.fm:1:69: error: data argument not used by format string\n");
+    // One left over is "not used" whatever it is, once; one with an error of its own has that error alone.
+    CHECK(errorsOf("int f2(void* r, int x) { return http_reply_text(r, 200, \"\", \"%d\", x, \"x\"); }\n")
+          == "test.fm:1:70: error: data argument not used by format string\n");
+    CHECK(errorsOf("int f3(void* r, int x) { return http_reply_text(r, 200, \"\", \"%d\", x, nope); }\n")
+          == "test.fm:1:70: error: use of undeclared identifier 'nope'\n");
     CHECK(errorsOf("int g(void* r, double x) { return http_reply_text(r, 200, \"\", \"%.18g\", x); }\n")
           == "test.fm:1:65: error: a reply's %.Ng takes a precision N of 1 to 17\ntest.fm:1:65: " + note);
     CHECK(errorsOf("int h(void* r, double x) { return http_reply_text(r, 200, \"\", \"x=%f\", x); }\n")
@@ -281,10 +290,19 @@ TEST_CASE("a reply's format is printf's %d, %g, %.Ng and %%, checked as clang ch
           == "test.fm:1:25: error: too few arguments to function call, expected at least 4, have 3\n");
     CHECK(errorsOf("int j(void* r, int k) { return http_reply_text(r, 200, \"\", k); }\n")
           == "test.fm:1:60: error: argument to 'http_reply_text' must be a string literal\n");
-    // A bool for %d, as C promotes it; a float or a double, and C's double constants, for %g.
+    // %s takes a string, a literal among them; and a string is no %d's.
+    CHECK(errorsOf("int s(void* r, int x) { return http_reply_text(r, 200, \"\", \"%s\", x); }\n")
+          == "test.fm:1:66: error: format specifies type 'string' but the argument has type 'int'\n");
+    CHECK(errorsOf("int t(void* r, string x) { return http_reply_text(r, 200, \"\", \"%d\", x); }\n")
+          == "test.fm:1:69: error: format specifies type 'int' but the argument has type 'string'\n");
+    CHECK(errorsOf("int u(void* r, string x) { return http_reply_text(r, 200, \"\", \"%s %s\", x); }\n")
+          == "test.fm:1:68: error: more '%' conversions than data arguments\n");
+    // A bool for %d, as C promotes it; a float or a double, and C's double constants, for %g; a string or a literal for
+    // %s.
     std::string errors;
-    CHECK(compile("int k(void* r, bool b, float f, double d)\n"
-                  "{ return http_reply_text(r, 200, \"\", \"%d %g %.9g %.17g %g %%\", b, f, d, 0.1, f * 0.5); }\n",
+    CHECK(compile("int k(void* r, bool b, float f, double d, string s)\n"
+                  "{ return http_reply_text(r, 200, \"\", \"%d %g %.9g %.17g %g %s %s %%\", b, f, d, 0.1, f * 0.5, s, "
+                  "\"x\"); }\n",
                   &errors));
     CHECK(errors.empty());
 }
@@ -343,7 +361,7 @@ TEST_CASE("every http_listen hands the library the program's route table, each l
     // A route after the listen that needs it, one twice, one in a function nothing calls.
     auto module = lowered("void* start() { return http_listen(); }\n"
                           "void* again() { return http_listen(); }\n"
-                          "int serve(void* r)\n"
+                          "int taker(void* r)\n"
                           "{\n"
                           "    if (http_is(r, \"GET /state\"))\n"
                           "        return http_reply(r, 204);\n"
@@ -480,7 +498,7 @@ TEST_CASE("webRoutes lists every route literal, its method and where it is, befo
     };
     std::string errors;
     auto program = fminus::Program::compile("#include \"presets.fm\"\n"
-                                            "int serve(void* r)\n"
+                                            "int taker(void* r)\n"
                                             "{\n"
                                             "    if (http_is(r, \"PUT /osc/%d/gain\") || preset(r))\n"
                                             "        return http_reply(r, 204);\n"

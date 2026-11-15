@@ -9,6 +9,10 @@
 //                   nonallocating function may call), and no external function (a prototype the program does not
 //                   define) unless its own prototype is marked nonblocking too.
 //
+// A within block (Within.cpp) is recorded as a call of its own (kWithinCall): its begin allocates and its end waits,
+// so both refuse it, a nonblocking function in the words it refuses http_wait in, a nonallocating one in clang's words
+// for an allocation that is no call ("must not allocate or deallocate memory").
+//
 // So a builtin of the runtime is in one of three classes: it allocates (refused in both), it blocks (refused in a
 // nonblocking function only), or it is wait-free (bytes_floats, fft_forward: allowed in both).
 //
@@ -28,6 +32,17 @@ namespace fminus::ir::detail
         const char* effectName(Lowering::Effect effect)
         {
             return effect == Lowering::Effect::NonBlocking ? "nonblocking" : "nonallocating";
+        }
+
+        // What a call of `callee` does that `effect` refuses, after "must not" (an error) or "because it" (a note): a
+        // call of it, or for a within block (Within.cpp), the wait at its end, in http_wait's words, under
+        // nonblocking, and its begin's allocation, in clang's words for one, under nonallocating.
+        std::string refused(const std::string& callee, const std::string& effect, bool note)
+        {
+            if (callee == kWithinCall && effect == "nonallocating")
+                return note ? "allocates or deallocates memory" : "allocate or deallocate memory";
+            const std::string name = callee == kWithinCall ? "http_wait" : callee;
+            return std::string(note ? "calls" : "call") + " non-'" + effect + "' function " + quoted(name);
         }
     } // namespace
 
@@ -61,7 +76,7 @@ namespace fminus::ir::detail
     std::optional<std::vector<Diagnostic>> Lowering::unsafe(const std::string& callee, Effect required,
                                                              std::vector<std::string>& looking)
     {
-        if (allocates(callee))
+        if (allocates(callee) || callee == kWithinCall)   // a within allocates where it begins
             return std::vector<Diagnostic>{};
         if (blocks(callee))
             return required == Effect::NonBlocking ? std::optional(std::vector<Diagnostic>{}) : std::nullopt;
@@ -84,9 +99,8 @@ namespace fminus::ir::detail
             if (auto inner = unsafe(call.callee, required, looking))
             {
                 notes = std::vector<Diagnostic>{{call.location,
-                                                 "function cannot be inferred '" + effect
-                                                     + "' because it calls non-'" + effect + "' function "
-                                                     + quoted(call.callee),
+                                                 "function cannot be inferred '" + effect + "' because it "
+                                                     + refused(call.callee, effect, true),
                                                  {}}};
                 notes->insert(notes->end(), inner->begin(), inner->end());
                 break;
@@ -114,8 +128,8 @@ namespace fminus::ir::detail
                 {
                     const std::string name = effectName(effect);
                     diagnostics_.error(call.location,
-                                       "function with '" + name + "' attribute must not call non-'" + name
-                                           + "' function " + quoted(call.callee),
+                                       "function with '" + name + "' attribute must not "
+                                           + refused(call.callee, name, false),
                                        std::move(*notes));
                 }
             }

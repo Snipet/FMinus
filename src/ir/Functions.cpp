@@ -67,14 +67,23 @@ namespace fminus::ir::detail
         if (const RuntimeBuiltin* runtime = findRuntimeBuiltin(function.name))
         {
             // A prototype with the builtin's own types, `int bytes_floats(const void* data, int bytes, float* out,
-            // int cap);` or `void json_free(void* doc);`, declares nothing new, as <math.h>'s do; one of a builtin that
-            // takes a string cannot be written, since FMinus has no char.
-            bool conflicts = function.returnType != resultType(runtime->result)
-                             || function.params.size() != runtime->arity;
+            // int cap);` or `void json_free(json_doc doc);`, declares nothing new, as <math.h>'s do; one of a builtin
+            // that takes a string literal cannot be written: a literal is no type. A handle may be written void*, as it
+            // was before FMinus had handles (`void json_free(void* doc);`), and a parameter that takes either of two
+            // handles as either.
+            const ast::Type voidPointer = ast::Type::pointerTo(ast::Kind::Void, false);
+            const ast::Type result = resultType(runtime->result);
+            bool conflicts =
+                (function.returnType != result && !(ast::isHandle(result) && function.returnType == voidPointer))
+                || function.params.size() != runtime->arity;
             for (std::size_t i = 0; !conflicts && i < function.params.size(); ++i)
             {
                 const std::optional<ast::Type> type = paramType(runtime->params[i]);
-                conflicts = !type || function.params[i].type != *type;
+                const std::optional<ast::Type> other = otherType(runtime->params[i]);
+                const ast::Type written = function.params[i].type;
+                conflicts = !type
+                            || (written != *type && written != other
+                                && !(ast::isHandle(*type) && written == voidPointer));
             }
             if (function.isDefinition)
                 error(function.location, quoted(function.name) + " is a builtin and cannot be redefined");
@@ -218,7 +227,11 @@ namespace fminus::ir::detail
                 error(param.location, "redefinition of parameter " + quoted(param.name));
         }
 
+        // The body is the function's outermost block: its defers run where it ends, and at each return.
+        deferScopes_.clear();
+        openDefers();
         lowerStatements(function.body);
+        closeDefers();
 
         if (!builder_.GetInsertBlock()->hasTerminator())
         {

@@ -24,6 +24,12 @@
 //   OnePole* (a module's pointer)  void*, or a pointer to a C++ struct with the same fields in the same order (which
 //                                  C++ lays out as FMinus does); module() says where each field is. A module itself
 //                                  never crosses: FMinus passes and returns modules by pointer only
+//   char*, const char*             the same pointer, to bytes FMinus reads as unsigned (0 to 255)
+//   string                         none promised: LLVM's pair {ptr, i32}, a pointer and an int in two registers each
+//                                  way on x86-64 and arm64 (what C does there with struct { const char* data; int
+//                                  size; } while registers remain), which other platforms' C does not match; keep it
+//                                  inside FMinus, and pass a host's text as a const char* and an int (string_of).
+//                                  call() and --run pass none
 //
 // A module's method is a function too, named as C++ qualifies it, whose first parameter is the instance it runs on:
 // `float tick(float x)` in `module OnePole` is function<float(void*, float)>("OnePole::tick", errors).
@@ -426,8 +432,11 @@ namespace fminus
 
         // An attribute of a field or a parameter, written after its name, C23's way:
         // `float level [[ui::unit("dB")]] [[fminus::range(-60, 0)]];` has two. FMinus's own have a meaning,
-        // fminus::range (a parameter's, or a field's of numbers) and fminus::default (a parameter's), and a clang::
-        // one, a function's, is refused on a field. Every other is the host's, passed on as written for the host to
+        // fminus::range (a parameter's, or a field's of numbers) and fminus::default (a parameter's, or a field's of
+        // numbers or bools, which json_read sets it to when a document does not fill it), and the json:: ones,
+        // json::name("name") and json::skip (the name json_read reads a field under, or none), and a clang:: one, a
+        // function's, is refused on a field. These are passed on too, as written. Every other is the host's, passed on
+        // as written for the host to
         // decide what it means, a unit, a label or a display hint: FMinus checks only that its numbers are numbers
         // (docs/extending.md, recipe 35). One exception: a name without a namespace that is none of C23's standard
         // attributes (deprecated, maybe_unused and the rest), `[[range(0, 1)]]`, is ignored with clang's warning
@@ -480,7 +489,10 @@ namespace fminus
             {
                 std::string name;
                 std::string type;          // as FMinus writes it: "float", "double", "float4", "float[16]",
-                                           // "double[8]", "float[4][16]", "Osc", "Osc *"; a parameter's "param float"
+                                           // "double[8]", "float[4][16]", "Osc", "Osc *", a handle's "json_doc" (laid
+                                           // out as a void* is); "string" (C's struct { const char* data; int size;
+                                           // }: 16 bytes, aligned to 8, valid as long as what it points into);
+                                           // "char[32]", bytes; a parameter's "param float"
                                            // (its slot). A "double" is 8 bytes, C++'s double, aligned to 8: a host
                                            // that reads fields by type reads one as a double, not as a float
                                            // (docs/extending.md, recipe 33)
@@ -700,11 +712,13 @@ namespace fminus
         const std::vector<WebRequest>& webRequests() const;
 
         // The web server (a build with FMINUS_WEB_SERVER). A program listens with http_listen(), which takes no
-        // argument: where is Options::web.server's, never the program's. It takes the requests that reach it with
-        // http_next (wait-free: on the audio thread, between blocks) or http_accept (which blocks), tells them apart
-        // with route literals, http_is(r, "PUT /osc/%d/gain"), and answers each once. Every route is a literal, so the
-        // host knows them all before anything runs, and the library answers 404 and 405 itself for a path or a method
-        // no route names: only a request the program declared reaches its code.
+        // argument: where is Options::web.server's, never the program's. It takes the requests that reach it with a
+        // serve statement, whose routes are literals with typed parameters, `route "PUT /osc/{k}/gain" (int k, float
+        // value) { ... reply 204; }` (or with the builtins it is made of: http_next, wait-free, on the audio thread
+        // between blocks, or http_accept, which blocks, and route literals, http_is(r, "PUT /osc/%d/gain")), and
+        // answers each once. Every route is a literal, so the host knows them all, and a route's parameters, before
+        // anything runs, and the library answers 404 and 405 itself for a path or a method no route names: only a
+        // request the program declared reaches its code.
         //
         //   options.web.server.listen = "localhost:0";
         //   auto program = Program::compile(source, errors, options);
@@ -713,19 +727,41 @@ namespace fminus
         //   program->function<void()>("init", errors)();                    // which calls http_listen()
         //   open("http://localhost:" + std::to_string(program->webPort()) + "/");
         //
-        // One call of http_is in the program's source: its route's method ("GET", "POST", "PUT", "PATCH" or "DELETE";
-        // a GET route answers HEAD too), its path as a pattern (each %d a "*"), and where the call is, in every call
-        // site's order of lowering.
+        // A route statement's parameter: what the request fills it from, and what it must be. A value that is
+        // missing (with no default) or not one of its type, or outside its range, is answered 400 by the program's
+        // own code before its route's block runs; a hole's that is no number does not match the route (404). A
+        // string's is a whole segment of the path (its bytes as the server holds them, letters, digits, '-', '.', '_'
+        // and '~'), or the query's field of its name, its bytes as sent, nothing decoded.
+        struct RouteParameter
+        {
+            std::string name;                     // "value", the query's field of that name for a query's
+            std::string type;                     // "int", "float", "bool", "string" or "http_request" (the request)
+            std::string source;                   // "path" (a hole of the route, `{note}`), "query" or "request"
+            std::optional<double> minimum;        // fminus::range(minimum, maximum): the least value a request may give
+            std::optional<double> maximum;        // and the greatest
+            std::optional<double> defaultValue;   // fminus::default(value): a query's, when the request has none
+            // fminus::default("text"): a string parameter's of the query, when the request has none (defaultValue
+            // is a number's, and none for a string).
+            std::optional<std::string> defaultText = std::nullopt;
+        };
+
+        // One route of the program's source: a call of http_is, or a serve's route statement (`statement`). Its
+        // method ("GET", "POST", "PUT", "PATCH" or "DELETE"; a GET route answers HEAD too), its path as a pattern (each
+        // %d, or each hole, a "*"), and where the call or the `route` is, in every one's order of lowering; and a route
+        // statement's parameters, in order.
         struct WebRoute
         {
             std::string method;    // "GET", "POST", "PUT", "PATCH" or "DELETE"
-            std::string pattern;   // the path, each %d a "*"
+            std::string pattern;   // the path, each %d or hole a "*"
             std::string file;      // the source file, as errors name it (Options::fileName, or an #include's)
             int line = 0;          // the call's line in that file, from 1
             int column = 0;        // and its column, from 1, as the errors count it
+            bool statement = false;                    // a route statement's; an http_is call's otherwise
+            std::vector<RouteParameter> parameters{};  // a route statement's, in order; none for an http_is call
         };
 
-        // Every call of http_is the program makes, or none (and none in a build without the web server).
+        // Every route the program names, by an http_is call or a route statement, or none (and none in a build
+        // without the web server).
         const std::vector<WebRoute>& webRoutes() const;
 
         // The port the program's server listens on (1 to 65535) once the program has called http_listen; 0 before,
@@ -734,14 +770,17 @@ namespace fminus
         int webPort() const noexcept;
 
         // Stops the program's network for good: every request in flight ends as HTTP_CANCELLED before this returns,
-        // waking every thread in http_wait, and every request the program starts from then on ends so at once. What
+        // waking every thread in http_wait or at a within block's end, and every request the program starts from then
+        // on ends so at once. What
         // completed stays readable until it is closed or the Program destroyed. A host that shuts a program down while
         // a thread of its own is in the program (a loader in http_wait) calls this, joins that thread, then destroys
         // the Program: destroying a Program while a thread still runs its code is undefined, as ever. Any thread may
         // call it, any number of times; it waits for the I/O thread (briefly): not on the audio thread. The
         // destructor calls it. It closes the program's server too: its sockets and every connection, every request
         // the program has not answered given up (its reply HTTP_CANCELLED), every thread in http_accept woken (null),
-        // and http_port HTTP_CANCELLED from then on; an http_listen after it never listens.
+        // and http_port HTTP_CANCELLED from then on; an http_listen after it never listens. The replies the program
+        // answered before it are sent first, each the last on its connection: it waits for them a quarter of a second
+        // at most, so a client that does not read its reply cannot hold it longer.
         void stopWeb() noexcept;
 
         // Files (a build with FMINUS_FILES). A program names a file only by a string literal, file_read("kit/%d.f32",
@@ -958,7 +997,8 @@ namespace fminus
             struct Param
             {
                 std::string name;   // as declared: "x"; "this" for a method's instance; empty for one with no name
-                std::string type;   // as FMinus writes it: "float", "const float *", "Osc *", "void *"
+                std::string type;   // as FMinus writes it: "float", "const float *", "Osc *", "void *", a handle's
+                                    // "json_doc" (which takes what a "void *" takes)
                 Value::Kind kind = Value::Kind::Float;     // Bool, Int, Float, Double or Pointer
                 Value::Kind element = Value::Kind::Void;   // a Pointer's elements: Int, Float or Double; Void for a
                                                            // module's instances, or for void*, which takes any

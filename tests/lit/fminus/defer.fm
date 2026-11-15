@@ -1,0 +1,79 @@
+// TS 25755's defer, a rewrite as the program is compiled: each exit of a block holds the code of the deferred
+// statements it runs, the last reached first, as clang emits them. No flag, no list and no call of the runtime's: at
+// -O0 a return computes its value, stores nothing, runs the deferred calls, and returns; a break runs those of the
+// blocks it leaves and branches. At -O2 the two returns' copies of the calls are one.
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: fminus %s -O2 | FileCheck %s --check-prefix=OPT
+
+void open_(int k);
+void close_(int k);
+
+int load(int k)
+{
+    open_(1);
+    defer close_(1);
+    open_(2);
+    defer close_(2);
+    if (k < 0)
+        return -1;
+    return k;
+}
+
+// CHECK-LABEL: define i32 @load(i32 %k)
+// CHECK-NOT:     alloca i1
+// CHECK:         call void @open_(i32 1)
+// CHECK-NEXT:    call void @open_(i32 2)
+// CHECK:       if.then:
+// CHECK-NEXT:    call void @close_(i32 2)
+// CHECK-NEXT:    call void @close_(i32 1)
+// CHECK-NEXT:    ret i32 -1
+// CHECK:       if.end:
+// CHECK-NEXT:    [[K:%.*]] = load i32, ptr %k.addr
+// CHECK-NEXT:    call void @close_(i32 2)
+// CHECK-NEXT:    call void @close_(i32 1)
+// CHECK-NEXT:    ret i32 [[K]]
+// CHECK-NOT:     call void @close_
+// CHECK:       }
+
+// OPT-LABEL: define {{.*}}i32 @load(i32 %k)
+// OPT:         tail call void @open_(i32 1)
+// OPT-NEXT:    tail call void @open_(i32 2)
+// OPT:         tail call void @close_(i32 2)
+// OPT-NEXT:    tail call void @close_(i32 1)
+// OPT-NOT:     call void
+// OPT:         ret i32
+
+int scan(const int* x, int n)
+{
+    int found = -1;
+    for (int i = 0; i < n; ++i)
+    {
+        open_(i);
+        defer close_(i);
+        if (x[i] == 0)
+            continue;
+        if (x[i] < 0)
+        {
+            found = i;
+            break;
+        }
+    }
+    return found;
+}
+
+// CHECK-LABEL: define i32 @scan(ptr %x, i32 %n)
+// CHECK:       for.body:
+// CHECK:         call void @open_(i32
+// CHECK:       if.then:
+// CHECK-NEXT:    [[I:%.*]] = load i32, ptr %i
+// CHECK-NEXT:    call void @close_(i32 [[I]])
+// CHECK-NEXT:    br label %for.inc
+// CHECK:       if.then{{[0-9]+}}:
+// CHECK:         store i32 {{%.*}}, ptr %found
+// CHECK-NEXT:    [[J:%.*]] = load i32, ptr %i
+// CHECK-NEXT:    call void @close_(i32 [[J]])
+// CHECK-NEXT:    br label %for.end
+// CHECK:       if.end{{[0-9]+}}:
+// CHECK-NEXT:    [[L:%.*]] = load i32, ptr %i
+// CHECK-NEXT:    call void @close_(i32 [[L]])
+// CHECK-NEXT:    br label %for.inc

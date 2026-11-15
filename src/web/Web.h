@@ -217,9 +217,11 @@ namespace fminus::web
         // Cancels every request still in flight, wakes every thread waiting on one (its wait returns
         // FMINUS_WEB_CANCELLED), waits for those threads to leave, frees every request made under it, closed or not,
         // and, if it was the last context to have used the I/O thread, joins that thread. Its server is closed first
-        // (stop()), every thread in fminus_web_http_accept woken and waited for, and then freed with every request
-        // it received. No thread may start a request under it, or use one of its requests or its server, once this
-        // has begun, except to wait on one already waited on, or in fminus_web_http_accept.
+        // (stop(): the replies the program handed over sent, for up to a quarter of a second), every thread in
+        // fminus_web_http_accept woken and waited for, and then freed with every request it received. No thread may
+        // start a request under it, or use one of its requests or its server, once this has begun, except a thread
+        // already in fminus_web_http_wait, a deadline scope's end or fminus_web_http_accept (counted there: see
+        // waitingThreads, below); a call that begins meanwhile may touch freed memory.
         ~Context();
 
         Context(const Context&) = delete;
@@ -231,10 +233,11 @@ namespace fminus::web
         // Stops the context's network for good: every request in flight is cancelled (FMINUS_WEB_CANCELLED, which
         // wakes the threads waiting on it) before this returns, and every request started from then on is
         // cancelled at once, a request one starts while this runs too. Its server, if it listens, is closed as
-        // fminus_web_http_close closes it (below), and one listened for from then on never listens (its port is
-        // FMINUS_WEB_CANCELLED). What has completed stays as it is, its body
-        // readable until it is closed or the context destroyed. Any thread may call it, any number of times; it waits
-        // for the I/O thread (briefly), so not the audio thread.
+        // fminus_web_http_close closes it (below): every thread in fminus_web_http_accept woken at once, the replies
+        // the program handed over sent before this returns (a quarter of a second at most, for a client that does not
+        // read), and one listened for from then on never listens (its port is FMINUS_WEB_CANCELLED). What has completed
+        // stays as it is, its body readable until it is closed or the context destroyed. Any thread may call it, any
+        // number of times; it waits for the I/O thread (briefly), so not the audio thread.
         void stop() noexcept;
 
         // What the policy says of `url` as it stands, without making a request: 0 when a pattern allows it, else
@@ -256,6 +259,14 @@ namespace fminus::web
 
     // Whether the I/O thread is running (for tests: it is joined when the last context that used it goes).
     bool ioThreadRunning();
+
+    // How many threads are in the library's waits on the requests of the context whose handle (Context::handle()) is
+    // `context`: fminus_web_http_wait, and a deadline scope's end. Each is counted under the context's mutex from
+    // before its first look at the context to after its last, and holds the mutex from its count until it waits; so
+    // stop() and ~Context, which take the mutex first, find every thread counted already waiting, wake it, and
+    // (~Context) wait for it to leave. For tests, which would otherwise guess with a sleep that a thread is inside the
+    // wait. Takes the mutex: not for the audio thread.
+    std::int32_t waitingThreads(void* context);
 
 #if FMINUS_HAS_WEB_SERVER
     // A directory's files as a server's static content (ServerPolicy::files), for a host that has no files of its own
@@ -300,10 +311,50 @@ extern "C"
                                std::int32_t count, const void* data, std::int32_t bytes, const char* type,
                                std::int32_t typeLength) noexcept;
 
+    // fminus_web_http_get and fminus_web_http_post with strings in the URL: its format has %s places as well as %d,
+    // each %s the next of the `textCount` texts, the i-th the `lengths[i]` bytes at `texts[i]` (a %s past the last:
+    // empty), each percent-encoded as it is filled in: every byte but the unreserved ones (A-Z, a-z, 0-9, "-", ".", "_",
+    // "~") written %XX, in upper case. The request is FMINUS_WEB_INVALID, before anything is looked up or sent, when a
+    // text is not one (a negative length, or a null address and bytes), when a %s is in the scheme or the authority
+    // (the literal's text up to the "/", "?" or "#" after its "://", the host and the port among it; everything, when
+    // the literal has no "://" before the %s), or when a path segment a %s is written in is, filled in, empty, "." or
+    // "..". The URL filled in then meets every check a URL meets (above): a text whose "/" or "\" becomes %2F or %5C
+    // in the path is FMINUS_WEB_REFUSED, as a literal's would be, and one past 8192 bytes, encoded, FMINUS_WEB_LIMIT.
+    // A %s in the query or the fragment is encoded and nothing more. A format with no %s is exactly the entry point
+    // without strings. A null context: refused, as theirs.
+    void* fminus_web_http_get_s(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                std::int32_t textCount) noexcept;
+    void* fminus_web_http_post_s(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                 std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                 std::int32_t textCount, const void* data, std::int32_t bytes, const char* type,
+                                 std::int32_t typeLength) noexcept;
+
+    // A function that writes a JSON literal's text into `buffer`, no more than `capacity` bytes of it, from its
+    // description and its values, and returns the bytes the whole text takes, or -1 for a description it refuses: the
+    // runtime's fminus_rt_json_write (runtime/Runtime.h), which a program passes by its address. The web library does
+    // not link the runtime; this is how its POST of a JSON literal reaches the writer.
+    using fminus_web_json_writer = std::int32_t (*)(char* buffer, std::int32_t capacity, const void* description,
+                                                    const void* values) noexcept;
+
+    // A POST whose body is a JSON literal's text, sent as application/json: the URL as fminus_web_http_post_s takes
+    // it (null `texts` and a `textCount` of 0: none, exactly as fminus_web_http_post's), and the body what `write`
+    // makes of `description` and `values`. It is measured first (a call with no buffer, which writes nothing), and a
+    // text over the policy's maxBodyBytes is FMINUS_WEB_LIMIT, as a body of that size is; then written once, straight
+    // into the request's own body, a buffer of exactly its size (no second copy), before this returns: the values
+    // may change once it has. A description `write` refuses (it returns -1), a null `write`, or a second text of
+    // another size than the first (values that changed between the two passes), is FMINUS_WEB_INVALID. The same
+    // checks, in the same order, as fminus_web_http_post's otherwise. A null context: refused, as theirs.
+    void* fminus_web_http_post_json(void* context, const char* url, std::int32_t length, const std::int32_t* ints,
+                                    std::int32_t count, const char* const* texts, const std::int32_t* lengths,
+                                    std::int32_t textCount, fminus_web_json_writer write, const void* description,
+                                    const void* values) noexcept;
+
     // Blocks the calling thread until the request is done or `timeoutMs` milliseconds have passed (0: does not wait;
     // negative: until it is done, which the policy's timeout bounds), and returns its status then (0 if it is still
-    // pending). Takes a lock and waits on a condition variable: not for the audio thread (it neither allocates nor
-    // frees). A null request is FMINUS_WEB_INVALID.
+    // pending). While the calling thread has a deadline scope open under the request's context (below), its innermost
+    // one's deadline bounds the wait too, as if it were the timeout. Takes a lock and waits on a condition variable:
+    // not for the audio thread (it neither allocates nor frees). A null request is FMINUS_WEB_INVALID.
     std::int32_t fminus_web_http_wait(void* request, std::int32_t timeoutMs) noexcept;
 
     // Wait-free reads, for the audio thread: each reads the request's atomics and nothing else, allocates nothing,
@@ -334,6 +385,43 @@ extern "C"
     // closes is freed with its context. Null, or a request a server received: nothing. A server: closes it (below).
     void fminus_web_http_close(void* request) noexcept;
 
+    // ---- deadline scopes (a `within (ms) { ... }` block) -------------------------------------------------------------
+    //
+    // A scope is the calling thread's and the context's: another thread, or another context, never sees it. While a
+    // thread has one open under a context, every request it starts there (fminus_web_http_get, _post, _get_s and
+    // _post_s) joins its innermost one, and the innermost one's deadline bounds the thread's waits under that context:
+    // fminus_web_http_wait, fminus_web_http_accept and fminus_web_http_accept_in return when it passes, with what they
+    // return on their own timeout. The policy's timeoutMs and maxRequests apply to each request as ever.
+
+    // Opens a scope on the calling thread under `context`, with a deadline `timeoutMs` milliseconds from now (negative:
+    // none of its own). Its deadline is the earlier of its own and the enclosing scope's (the thread's innermost one
+    // under the context, if any). Returns 0; or FMINUS_WEB_FAILED when memory ran out, and no scope is open (the caller
+    // then does not end one). A null context (a program given no network): nothing, and 0. Allocates and takes the
+    // context's mutex: not for the audio thread.
+    std::int32_t fminus_web_http_within_begin(void* context, std::int32_t timeoutMs) noexcept;
+
+    // Ends the calling thread's innermost scope under `context`: waits until every request that joined it and is
+    // still pending has ended, or until its deadline; then cancels those left, whose status becomes
+    // FMINUS_WEB_TIMEOUT (time ended them, not the program), and waits for the I/O thread to have ended them; then
+    // closes the scope. When it returns, none of the scope's requests is pending. Requests of the scope the program
+    // closed already are not its concern. Returns 0 when every request had ended by itself; FMINUS_WEB_TIMEOUT when the
+    // deadline came first and some were cancelled; FMINUS_WEB_CANCELLED when the context was stopped (Context::stop:
+    // its requests ended as FMINUS_WEB_CANCELLED, and the wait ends with them) or is being destroyed (~Context wakes
+    // it, its requests cancelled, and the scope goes with the context); FMINUS_WEB_INVALID when the thread has no scope
+    // open there (nothing is done). A null context: 0. Blocks, as fminus_web_http_wait does: not for the audio thread.
+    // A scope left open is freed with its context.
+    std::int32_t fminus_web_http_within_end(void* context) noexcept;
+
+    // Abandons every scope the calling thread has open under `context`, at once and without waiting: for a call the
+    // program's loop budget or a bounds check stopped, which leaves every block it was in without reaching its end
+    // (the compiler's passes call it on their way out of each function that begins a scope: opt/EarlyReturn.h). The
+    // requests that joined them go on as requests started outside any scope do, under the policy's own limits, and no
+    // later request, wait or scope of the thread sees them; nor does a later thread the system gives the same id.
+    // Returns how many scopes it abandoned (0: the thread had none open there). A null context: 0. Wait-free: it
+    // takes no lock, allocates nothing and makes no system call, whether the thread has a scope open or not: a few
+    // atomic loads, and two atomic stores when it has one (Web.cpp says how). Another thread's scopes are left alone.
+    std::int32_t fminus_web_http_within_abandon(void* context) noexcept;
+
     // An executable's (support/Aot.h: the C main of a program that calls http_get or http_post). It has no host, so the
     // person who runs it says what it may reach, in its environment: FMINUS_WEB_ALLOW, the patterns (above) separated
     // by spaces, commas or newlines (unset or empty: no network, the default), and FMINUS_WEB_CA_FILE, PEM roots to
@@ -361,8 +449,15 @@ extern "C"
 
     // The program's server under `context` (Context::handle), with its route table: `count` route literals, the i-th
     // the `lengths[i]` bytes at `routes[i]`, each a method, one space and a path in which "%d" stands for a decimal
-    // number ("GET /osc/%d/detune"). The compiler checks the literals; the library trusts no byte of them, and a
-    // literal that is not a route is left out (it never matches). Binds and listens on the calling thread, then hands
+    // number ("GET /osc/%d/detune") and "%s", a segment by itself, for one whole segment ("PUT /presets/%s"). At most
+    // 8 places (%d and %s together) a route. The compiler checks the literals; the library trusts no byte of them, and
+    // a literal that is not a route is left out (it never matches; the others keep their indexes).
+    //
+    // The route a request is published for: of the table's routes whose path matches the request's and whose method
+    // admits it (rule 6), the most specific, as Go's ServeMux has it: compared segment by segment, from the first, the
+    // first segment that differs deciding, a literal segment is more specific than one with a %d (one with fewer %d than
+    // one with more), and one with a %d than a %s. Two routes that rank the same in every segment (which the compiler
+    // refuses as an overlap) go to the first in the table. Binds and listens on the calling thread, then hands
     // the sockets to the I/O thread, and returns at once. A context listens once: a second call returns the same
     // server, its routes unchanged. A null context, or one whose policy has no listen, gives one shared server that
     // never listens (its port FMINUS_WEB_REFUSED) and needs no closing. A failed bind or listen (the address is not
@@ -384,18 +479,64 @@ extern "C"
 
     // The same, waiting up to `timeoutMs` milliseconds for one (0: does not wait; negative: until one comes or the
     // server is closed). Null at once for a server that does not listen, and when the server is closed or its context
-    // stopped or destroyed meanwhile. Takes a lock and waits on a condition variable: not for the audio thread.
+    // stopped or destroyed meanwhile. The calling thread's innermost deadline scope under the server's context (above)
+    // bounds the wait as its timeout does. Takes a lock and waits on a condition variable: not for the audio thread.
     void* fminus_web_http_accept(void* server, std::int32_t timeoutMs) noexcept;
+
+    // A route set: `words` 64-bit words at `routes`, route i of the table (fminus_web_http_listen's index) in it when
+    // bit i % 64 of word i / 64 is 1. A constant of the program: ceil(count / 64) words, one bit for each route its
+    // `serve` names. Null, or 0 or fewer words, is the empty set; an index past the words is not in it.
+    //
+    // fminus_web_http_next for the requests published for a route in the set alone: the oldest of those, claimed, or
+    // null. A request for another route is neither taken nor in the way: it waits for a taker whose set has its route,
+    // or for replyTimeoutMs (503), as a request no one takes always has. Wait-free, as fminus_web_http_next.
+    void* fminus_web_http_next_in(void* server, const std::uint64_t* routes, std::int32_t words) noexcept;
+
+    // fminus_web_http_accept for the set alone: woken by every request published, it takes one for its set or waits on.
+    // Blocks, as fminus_web_http_accept.
+    void* fminus_web_http_accept_in(void* server, const std::uint64_t* routes, std::int32_t words,
+                                    std::int32_t timeoutMs) noexcept;
+
+    // The table index of the route the request was published for (above), which is in the taker's set when it was
+    // taken by one; and that route's places become the request's, as fminus_web_http_is of its literal would make
+    // them (for fminus_web_http_arg and fminus_web_http_text). FMINUS_WEB_INVALID for a handle that is not a request the
+    // caller holds. Wait-free.
+    std::int32_t fminus_web_http_route(void* request) noexcept;
 
     // 1 when the request's method and path are the route literal's, the `length` bytes at `route` (a method, a space
     // and a path, as fminus_web_http_listen takes them; a GET route matches a HEAD request too), else 0. Each %d of the
     // literal takes a decimal number of the path, 1 to 10 digits whose value fits an int (0 to 2147483647), all the
-    // digits there are; when the request matches, the numbers it took are stored for fminus_web_http_arg, and when it
-    // does not, they are as they were. Wait-free: bounded by the literal's and the path's lengths.
+    // digits there are; each %s, which must be a segment by itself (else the literal never matches), one whole segment
+    // as it is. When the request matches, the places it filled are stored for fminus_web_http_arg and
+    // fminus_web_http_text, and when it does not, they are as they were. It is the program's own test of a literal: the
+    // route the request was published for (fminus_web_http_route) does not change what it says. Wait-free: bounded by
+    // the literal's and the path's lengths.
     std::int32_t fminus_web_http_is(void* request, const char* route, std::int32_t length) noexcept;
 
-    // The `index`-th number (from 0) the last fminus_web_http_is that matched took, or 0 (no such number). Wait-free.
+    // The `index`-th place (from 0, %d and %s counted together, in the literal's order) the last fminus_web_http_is
+    // that matched filled, or fminus_web_http_route: a number's value; 0 for a text's, and when there is no such place.
+    // Wait-free.
     std::int32_t fminus_web_http_arg(const void* request, std::int32_t index) noexcept;
+
+    // The text of a request. Each returns the address of its bytes and stores their count in `*length` (when
+    // `length` is not null): no 0 byte after them, valid until the request is answered. A handle that is not a request
+    // the caller holds: null, and 0. Wait-free: each reads the request's slot and nothing else.
+    //   text        the `index`-th place's bytes (as fminus_web_http_arg counts them): a %s's segment, or a %d's
+    //               digits as the path has them ("0042"); null and 0 when there is no such place.
+    //   path        the request's path as sent, without its query ("/osc/3/detune").
+    //   header      the value of the request's first header field whose name is the `nameLength` bytes at `name`
+    //               (an HTTP token; compared without regard to ASCII case), without the white space around it; empty
+    //               (a non-null address, 0) when there is none, or the name is not a token. With a token in the
+    //               policy, Authorization is the host's secret and is never given (empty). At most 64 fields.
+    //   query_text  the value of the query's first field "name=value" whose name is the `nameLength` bytes at `name`,
+    //               compared byte for byte, as it is (nothing decoded), as the numbers' reads find it; null and 0 when
+    //               there is no such field, a non-null address when there is ("?v=" and "?v" are present and empty).
+    const char* fminus_web_http_text(const void* request, std::int32_t index, std::int32_t* length) noexcept;
+    const char* fminus_web_http_path(const void* request, std::int32_t* length) noexcept;
+    const char* fminus_web_http_header(const void* request, const char* name, std::int32_t nameLength,
+                                       std::int32_t* length) noexcept;
+    const char* fminus_web_http_query_text(const void* request, const char* name, std::int32_t nameLength,
+                                           std::int32_t* length) noexcept;
 
     // A number of the request's query: the value of the first field "name=value" whose name is the `length` bytes at
     // `name`, compared byte for byte (nothing is decoded), read whole; or `fallback` when there is no such field, or
@@ -414,6 +555,7 @@ extern "C"
     //                         size or a content type that cannot be (the request is still the caller's)
     //   FMINUS_WEB_CANCELLED  the library gave up on the request meanwhile (its client left, its reply timed out and
     //                         was answered 503, or the server closed): the handle is dead, and its slot free
+    // A reply that returned 0 is sent, a server closed right after it included (fminus_web_http_close, below).
     // A request taken must be answered: its slot is the taker's until it is, whatever its client was told, so one never
     // answered holds its slot until the server closes, and maxPending of them leave every later request a 503.
     // A content type is the `typeLength` bytes at `type`, printable ASCII, at most 255 bytes; empty: none for a reply
@@ -432,19 +574,46 @@ extern "C"
     // %.Ng with N (one or two digits; 0 is 1) significant digits, %% a percent sign; written by std::to_chars, so the
     // same in every locale, with no allocation. Each value is a double: the program's int as a double (exactly), its
     // float widened to one (as printf's float argument is), its double as it is. The compiler checks the format; the
-    // library trusts no byte of it: a % that begins none of the four is itself, a %d of a value that is no int is
-    // C's conversion saturated (NaN is 0), and a place past the last value is nothing.
+    // library trusts no byte of it: a % that begins none of these is itself (a %s among them), a %d of a value that is
+    // no int is C's conversion saturated (NaN is 0), and a place past the last value is nothing.
     std::int32_t fminus_web_http_reply_text(void* request, std::int32_t status, const char* type,
                                             std::int32_t typeLength, const char* format, std::int32_t formatLength,
                                             const double* values, std::int32_t count) noexcept;
 
+    // The same with strings: a %s is the next of the `textCount` strings, the i-th the `lengths[i]` bytes at
+    // `texts[i]`, written as they are (a %s past the last is nothing); the values fill the other places, in their
+    // order. A string with a negative length, or a null address and bytes, is FMINUS_WEB_INVALID, and nothing is sent.
+    // Null `texts` or `lengths`, or no strings: every %s is nothing. Wait-free, as the reply above.
+    std::int32_t fminus_web_http_reply_text_s(void* request, std::int32_t status, const char* type,
+                                              std::int32_t typeLength, const char* format, std::int32_t formatLength,
+                                              const double* values, std::int32_t count, const char* const* texts,
+                                              const std::int32_t* lengths, std::int32_t textCount) noexcept;
+
+    // A reply written in place: the body written straight into the request's own reply buffer (the one the replies
+    // above copy into), then published. fminus_web_http_reply_buffer gives that buffer's address, and its capacity,
+    // the policy's maxReplyBytes, in `*capacity` (when `capacity` is not null); null and 0 for a handle that is not a
+    // request the caller holds. The buffer is the caller's to write until it answers the request, and nothing else
+    // reads it before then: getting it answers nothing (a request whose buffer was got and nothing published is still
+    // unanswered, and still must be answered, by any reply). fminus_web_http_reply_written answers the request with
+    // `status` and the first `bytes` bytes of the buffer as its body, with the content type of `typeLength` bytes at
+    // `type` (empty: application/octet-stream), and returns as the replies above: 0; FMINUS_WEB_LIMIT for `bytes` over
+    // the capacity (the request still the caller's); FMINUS_WEB_INVALID for a handle not held, a negative `bytes`, a
+    // status or a content type that cannot be (204 and 304 with a body among them); FMINUS_WEB_CANCELLED. Both are
+    // wait-free; json_write (runtime/Runtime.h) writes a literal into the buffer and gives the bytes to publish.
+    char* fminus_web_http_reply_buffer(void* request, std::int32_t* capacity) noexcept;
+    std::int32_t fminus_web_http_reply_written(void* request, std::int32_t status, std::int32_t bytes,
+                                               const char* type, std::int32_t typeLength) noexcept;
+
     // fminus_web_http_size and fminus_web_http_body (above) on a request a server received: its body, of
     // Content-Length bytes (with one 0 byte after its last, not counted), until the request is answered.
     //
-    // fminus_web_http_close (above) on a server: stops listening, closes every connection (a request waiting is given
-    // up: its answer is FMINUS_WEB_CANCELLED), wakes every thread in fminus_web_http_accept (null), and leaves the
-    // port FMINUS_WEB_CANCELLED. The handle, and those of the requests it received, stay safe to use until the context
-    // is destroyed. Any number of times; the shared refused server: nothing. Waits for the I/O thread (briefly): not
-    // for the audio thread.
+    // fminus_web_http_close (above) on a server: stops listening, gives up every request the program has not answered
+    // (its answer is FMINUS_WEB_CANCELLED) and every one it has not taken, wakes every thread in fminus_web_http_accept
+    // (null), and leaves the port FMINUS_WEB_CANCELLED; then sends every reply the program published before it (one
+    // that returned 0), each the last response on its connection (Connection: close), and closes every connection. It
+    // waits for those replies to go out a quarter of a second at most: a client that does not read its reply cannot
+    // hold it longer (its connection is closed with as much of the reply as its socket took). The handle, and those of
+    // the requests it received, stay safe to use until the context is destroyed. Any number of times; the shared
+    // refused server: nothing. Waits for the I/O thread (briefly), and for those replies: not for the audio thread.
 #endif
 }

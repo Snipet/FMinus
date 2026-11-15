@@ -69,7 +69,7 @@ endif()
 target_sources(fminus_runtime PRIVATE $<TARGET_OBJECTS:fminus_pffft>)
 target_include_directories(fminus_runtime SYSTEM PRIVATE "${FMINUS_PFFFT_INCLUDE_DIR}")
 target_compile_definitions(fminus_runtime PRIVATE PFFFT_STATIC_DEFINE)
-# fast_float (cmake/FMinusFastFloat.cmake), the parsers' numbers (runtime/Numbers.cpp), when FMINUS_JSON or FMINUS_XML.
+# fast_float (cmake/FMinusFastFloat.cmake), the parsers' numbers and string_float's (runtime/Numbers.cpp).
 if(TARGET fminus_fast_float)
   target_link_libraries(fminus_runtime PRIVATE fminus_fast_float)
 endif()

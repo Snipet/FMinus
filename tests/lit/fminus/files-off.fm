@@ -24,6 +24,17 @@ int load(const void* data)
     return s + file_append("user/log.txt", data, 4) + FILE_REFUSED;
 }
 
+// A file's name with holes, and a listing's names: the same error, once a call.
+int named(string name, int k, const void* data)
+{
+    file_content f = file_read("kit/{name}/{k}.f32");
+    file_listing l = file_list("kit/{name}/*.f32");
+    return string_size(file_name(l, k)) + file_write("user/{name}.f32", data, 4);
+}
+
+// A JSON literal to a file: the file interface's error, once a call, whatever the JSON writer.
+int saved(int n) { return file_write("user/n.json", json { "n": n }) + file_append("user/n.jsonl", json (n)); }
+
 // CHECK: files-off.fm:18:15: error: 'file_read' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
 // CHECK: files-off.fm:19:15: error: 'file_list' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
 // CHECK: files-off.fm:20:13: error: 'file_status' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
@@ -35,6 +46,12 @@ int load(const void* data)
 // CHECK: files-off.fm:23:5: error: 'file_close' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
 // CHECK: files-off.fm:24:16: error: 'file_append' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
 // CHECK: files-off.fm:24:55: error: 'FILE_REFUSED' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:30:22: error: 'file_read' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:31:22: error: 'file_list' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:32:24: error: 'file_name' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:32:43: error: 'file_write' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:36:27: error: 'file_write' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
+// CHECK: files-off.fm:36:72: error: 'file_append' needs the file interface, which this build of FMinus leaves out (FMINUS_FILES=OFF)
 
 // READ: fminus: --files-read: this build of FMinus leaves out the file interface (FMINUS_FILES=OFF)
 // WRITE: fminus: --files-write: this build of FMinus leaves out the file interface (FMINUS_FILES=OFF)

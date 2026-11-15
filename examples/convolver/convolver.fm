@@ -29,7 +29,7 @@ int fft_size(int need)
 
 module Convolver
 {
-    void* plan;
+    fft_plan plan;
     int block;          // samples a block, and the latency
     int size;           // the FFT's points: at least block + length - 1, so a block's convolution never wraps around
     int filled;         // samples of the block gathered so far

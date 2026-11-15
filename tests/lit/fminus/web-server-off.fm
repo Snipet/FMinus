@@ -1,16 +1,16 @@
 // In a build without the web server (FMINUS_WEB_SERVER=OFF, the default, with or without FMINUS_WEB), each of its
-// builtins is still a name FMinus knows: its call is an error that names the option, not an undeclared function;
-// __FMINUS_WEB_SERVER__ is not defined; and the driver's server options say the build has no server.
+// builtins is still a name FMinus knows: its call (and a serve) is an error that names the option, not an undeclared
+// function; __FMINUS_WEB_SERVER__ is not defined; and the driver's server options say the build has no server.
 // UNSUPPORTED: web-server
 // RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
-// RUN: not fminus %s --run serve --web-listen 127.0.0.1:0 2>&1 | FileCheck %s --check-prefix=LISTEN
-// RUN: not fminus %s --run serve --web-root %S 2>&1 | FileCheck %s --check-prefix=ROOT
+// RUN: not fminus %s --run taker --web-listen 127.0.0.1:0 2>&1 | FileCheck %s --check-prefix=LISTEN
+// RUN: not fminus %s --run taker --web-root %S 2>&1 | FileCheck %s --check-prefix=ROOT
 
 #ifdef __FMINUS_WEB_SERVER__
 #error __FMINUS_WEB_SERVER__ is defined
 #endif
 
-int serve(const float* data)
+int taker(const float* data)
 {
     void* s = http_listen();
     void* r = http_next(s);
@@ -19,6 +19,31 @@ int serve(const float* data)
     float g = http_query_float(r, "g", 0.0f);
     n = n + http_reply(r, 204) + http_reply_bytes(a, 200, data, 4, "") + http_reply_text(a, 200, "", "%g", g);
     return n;
+}
+
+void served(void* s) [[clang::nonblocking]]
+{
+    serve (s) { route "GET /a/{n}" (int n) { reply 200, json { n }; } }
+    serve (s, 10) { route "GET /b" { reply 204; } }
+}
+
+// A request's text, and a serve whose route takes a string and replies with one in a JSON literal: one error a call,
+// and one a serve.
+int texts(http_request q, http_server s)
+{
+    int n = string_size(http_header(q, "content-type")) + string_size(http_path(q));
+    n = n + string_size(http_query_string(q, "mode", "full"));
+    serve (s) { route "GET /p/{name}" (string name) { reply 200, json { "name": name }; } }
+    return n;
+}
+
+// A reply of json (expression) in a serve, and http_reply_json itself: the server's error, once each, whatever the JSON
+// writer.
+module P { float gain; };
+int replied(http_request q, http_server s, P* p)
+{
+    serve (s) { route "GET /p" { reply 200, json (*p); } }
+    return http_reply_json(q, 200, json (*p));
 }
 
 // CHECK: web-server-off.fm:15:15: error: 'http_listen' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
@@ -32,6 +57,14 @@ int serve(const float* data)
 // CHECK: web-server-off.fm:20:13: error: 'http_reply' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
 // CHECK: web-server-off.fm:20:34: error: 'http_reply_bytes' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
 // CHECK: web-server-off.fm:20:74: error: 'http_reply_text' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:26:5: error: 'serve' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:27:5: error: 'serve' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:34:25: error: 'http_header' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:34:71: error: 'http_path' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:35:25: error: 'http_query_string' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:36:5: error: 'serve' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:45:5: error: 'serve' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
+// CHECK: web-server-off.fm:46:12: error: 'http_reply_json' needs the web server, which this build of FMinus leaves out (FMINUS_WEB_SERVER=OFF)
 
 // LISTEN: fminus: --web-listen: this build of FMinus leaves out the web server (FMINUS_WEB_SERVER=OFF)
 // ROOT: fminus: --web-root: this build of FMinus leaves out the web server (FMINUS_WEB_SERVER=OFF)

@@ -126,6 +126,7 @@ namespace fminus::ast
         std::string declared(Type type, bool isConst, bool isRestrict, const Expr* size = nullptr,
                              const Expr* rowSize = nullptr);
         std::string stringLiteral(const std::string& text);
+        std::string dump(const JsonValue& value);
 
         std::string dump(const Expr& expr)
         {
@@ -202,8 +203,36 @@ namespace fminus::ast
                                   [](const StringExpr& string) {   // "a\0b", one literal however written
                                       return stringLiteral(string.value);
                                   },
+                                  [](const JsonExpr& json) {   // (json {"gain" gain "taps" [a b]})
+                                      return "(json " + dump(json.value) + ")";
+                                  },
                               },
                               expr.node);
+        }
+
+        // A JSON literal's value: an expression, {"key" value ...}, or [value ...].
+        std::string dump(const JsonValue& value)
+        {
+            switch (value.kind)
+            {
+            case JsonValue::Kind::Value:
+                return dump(*value.value);
+            case JsonValue::Kind::Object:
+            {
+                std::string text = "{";
+                for (std::size_t i = 0; i < value.elements.size(); ++i)
+                    text += (i > 0 ? " " : "") + stringLiteral(value.keys[i].value) + " " + dump(value.elements[i]);
+                return text + "}";
+            }
+            case JsonValue::Kind::Array:
+            {
+                std::string text = "[";
+                for (std::size_t i = 0; i < value.elements.size(); ++i)
+                    text += (i > 0 ? " " : "") + dump(value.elements[i]);
+                return text + "]";
+            }
+            }
+            return "";
         }
 
         // A declared name's type, as C spells it: `const float`, `const float * restrict`, `float * const`,
@@ -315,6 +344,18 @@ namespace fminus::ast
                    + (decl.hasList ? " " + list(decl.list, decl.braces) : "") + ")";
         }
 
+        std::string dump(const Stmt& stmt, const std::string& indent);
+        std::string dump(const Route& route, const std::string& indent);
+
+        // A selection statement's declarations (C2y's), each followed by a space: `(decl int n 1) `.
+        std::string declarations(const std::vector<Stmt>& init)
+        {
+            std::string text;
+            for (const Stmt& item : init)
+                text += dump(item, "") + " ";
+            return text;
+        }
+
         // One statement per line, `indent` spaces in; a block's items one level further in.
         std::string dump(const Stmt& stmt, const std::string& indent)
         {
@@ -331,8 +372,9 @@ namespace fminus::ast
                                       return text + ")";
                                   },
                                   [&](const EmptyStmt&) { return indent + "(empty)"; },
-                                  [&](const IfStmt& branch) {
-                                      std::string text = indent + "(if " + dump(*branch.condition) + "\n"
+                                  [&](const IfStmt& branch) {   // (if (decl int n 1) (> n 0)\n  s): C2y's head
+                                      std::string text = indent + "(if " + declarations(branch.init)
+                                                         + dump(*branch.condition) + "\n"
                                                          + dump(*branch.thenBranch, indent + "  ");
                                       if (branch.elseBranch)
                                           text += "\n" + dump(*branch.elseBranch, indent + "  ");
@@ -354,7 +396,8 @@ namespace fminus::ast
                                   [&](const BreakStmt&) { return indent + "(break)"; },
                                   [&](const ContinueStmt&) { return indent + "(continue)"; },
                                   [&](const SwitchStmt& branch) {   // (switch x\n  (block ...))
-                                      return indent + "(switch " + dump(*branch.value) + "\n"
+                                      return indent + "(switch " + declarations(branch.init) + dump(*branch.value)
+                                             + "\n"
                                              + dump(*branch.body, indent + "  ") + ")";
                                   },
                                   [&](const CaseStmt& label) {   // (case 1), or (case 1\n  s) with a body
@@ -381,8 +424,52 @@ namespace fminus::ast
                                           text += "\n" + dump(task, indent + "  ");
                                       return text + ")";
                                   },
+                                  [&](const DeferStmt& deferred) {   // (defer\n  s)
+                                      return indent + "(defer\n" + dump(*deferred.body, indent + "  ") + ")";
+                                  },
+                                  [&](const ServeStmt& serve) {   // (serve server 100\n  (route ...))
+                                      std::string text = indent + "(serve";
+                                      for (const ExprPtr& arg : serve.args)
+                                          text += " " + dump(*arg);
+                                      for (const Route& route : serve.routes)
+                                          text += "\n" + dump(route, indent + "  ");
+                                      return text + ")";
+                                  },
+                                  [&](const ReplyStmt& reply) {   // (reply 200 (json {"gain" gain}))
+                                      std::string text = indent + "(reply";
+                                      for (const ExprPtr& arg : reply.args)
+                                          text += " " + dump(*arg);
+                                      return text + ")";
+                                  },
+                                  [&](const WhenStmt& when) {   // (when c\n  s)
+                                      return indent + "(when " + dump(*when.condition) + "\n"
+                                             + dump(*when.body, indent + "  ") + ")";
+                                  },
+                                  [&](const WithinStmt& within) {   // (within 100\n  (block ...))
+                                      return indent + "(within " + dump(*within.timeout) + "\n"
+                                             + dump(*within.body, indent + "  ") + ")";
+                                  },
                               },
                               stmt.node);
+        }
+
+        // (route "POST /note/{note}" ((int note [[fminus::range(0, 127)]]))\n  items...): its literal as written, its
+        // parameters when it has a list, the attributes after the list, and its block's items.
+        std::string dump(const Route& route, const std::string& indent)
+        {
+            std::string text = indent + "(route " + stringLiteral(route.literal.value);
+            if (route.hasParams)
+            {
+                std::string params;
+                for (const RouteParam& param : route.params)
+                    params += std::string(params.empty() ? "" : " ") + "(" + (param.isConst ? "const " : "")
+                              + typeName(param.type) + " " + param.name + attributesText(param.attributes) + ")";
+                text += " (" + params + ")";
+            }
+            text += attributesText(route.attributes);
+            for (const Stmt& item : route.body)
+                text += "\n" + dump(item, indent + "  ");
+            return text + ")";
         }
     } // namespace
 
@@ -470,8 +557,45 @@ namespace fminus::ast
                 return typeName(elementOf(type)) + "[" + std::to_string(type.count) + "]["
                        + std::to_string(type.rowCount) + "]";
             return typeName(pointee(type)) + "[" + std::to_string(type.count) + "]";
+        case Kind::Handle:   // its typedef's name, as clang writes one: http_response
+            return handleName(type.handle);
+        case Kind::Char:
+            return "char";
+        case Kind::String:   // FMinus's, a typedef's name to clang
+            return "string";
         }
         return "?";
+    }
+
+    const char* handleName(Handle handle)
+    {
+        switch (handle)
+        {
+        case Handle::HttpResponse:
+            return "http_response";
+        case Handle::HttpRequest:
+            return "http_request";
+        case Handle::HttpServer:
+            return "http_server";
+        case Handle::JsonDoc:
+            return "json_doc";
+        case Handle::XmlDoc:
+            return "xml_doc";
+        case Handle::FileContent:
+            return "file_content";
+        case Handle::FileListing:
+            return "file_listing";
+        case Handle::FftPlan:
+            return "fft_plan";
+        case Handle::None:
+            break;
+        }
+        return "?";
+    }
+
+    std::string handleStruct(Handle handle)
+    {
+        return std::string("struct fminus_") + handleName(handle);
     }
 
     std::string dump(const Program& program)

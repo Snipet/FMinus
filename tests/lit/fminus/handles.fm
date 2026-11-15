@@ -1,0 +1,73 @@
+// The handle types (http_response, json_doc, fft_plan, ...): each a ptr, as the void* it replaces was, read and written
+// with the pointer's TBAA tag, null where a declaration has no initialiser; an array of them an array of ptrs, zeroed;
+// == a pointer comparison, and a test against null. A void* converts to one and back with no instruction. --run treats
+// one as it treats a void*. Then the errors, each once, in clang's words.
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - -O0 | FileCheck %s
+// RUN: sed -n '/^\/\/ ERRORS$/,$p' %s | not fminus - 2>&1 | FileCheck %s --check-prefix=ERR --implicit-check-not=error:
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | not fminus - --run isNull 0 2>&1 | FileCheck %s --check-prefix=RUNS
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | not fminus - --run plan 32 2>&1 | FileCheck %s --check-prefix=RESULT
+
+module Analyzer
+{
+    fft_plan plan;
+    fft_plan spares[4];
+};
+
+int ready(Analyzer* a, void* given)
+{
+    fft_plan local;
+    a->spares[1] = given;
+    return a->plan == a->spares[1] && !local ? 1 : 0;
+}
+
+// CHECK-LABEL: define i32 @ready(ptr %a, ptr %given)
+// CHECK:         %local = alloca ptr
+// CHECK:         store ptr null, ptr %local
+// CHECK:         [[GIVEN:%.*]] = load ptr, ptr %given.addr, align 8, !tbaa [[POINTER:![0-9]+]]
+// CHECK:         [[SPARES:%.*]] = getelementptr inbounds [4 x ptr], ptr {{%.*}}, i64 0, i64 0
+// CHECK-NEXT:    [[SPARE:%.*]] = getelementptr inbounds ptr, ptr [[SPARES]], i64 1
+// CHECK-NEXT:    store ptr [[GIVEN]], ptr [[SPARE]], align 8, !tbaa [[POINTER]]
+// CHECK:         [[PLAN:%.*]] = load ptr, ptr %plan, align 8, !tbaa [[POINTER]]
+// CHECK:         [[SPARE1:%.*]] = load ptr, ptr %arrayidx{{[0-9]+}}, align 8, !tbaa [[POINTER]]
+// CHECK-NEXT:    icmp eq ptr [[PLAN]], [[SPARE1]]
+// CHECK:         [[LOCAL:%.*]] = load ptr, ptr %local, align 8, !tbaa [[POINTER]]
+// CHECK-NEXT:    icmp ne ptr [[LOCAL]], null
+
+void* made(int n)
+{
+    fft_plan plans[2];
+    plans[0] = fft_create(n);
+    return plans[0];
+}
+
+// CHECK-LABEL: define ptr @made(i32 %n)
+// CHECK:         %plans = alloca [2 x ptr]
+// CHECK:         call void @llvm.memset.p0.i64(ptr align 8 %plans, i8 0, i64 16, i1 false)
+// CHECK:         [[PLAN:%.*]] = call ptr @fminus_rt_fft_create(i32
+// CHECK:         store ptr [[PLAN]], ptr {{%.*}}, align 8, !tbaa [[POINTER]]
+// CHECK:         [[BACK:%.*]] = load ptr, ptr {{%.*}}, align 8, !tbaa [[POINTER]]
+// CHECK-NEXT:    ret ptr [[BACK]]
+
+// CHECK: [[POINTER]] = !{[[ANY:![0-9]+]], [[ANY]], i64 0}
+// CHECK: [[ANY]] = !{!"any pointer", {{![0-9]+}}, i64 0}
+
+int isNull(fft_plan p) { return p ? 0 : 1; }
+fft_plan plan(int n) { return fft_create(n); }
+
+// RUNS: fminus: --run: 'isNull' takes a parameter of type 'fft_plan'; --run passes bools, ints, floats, doubles and arrays of ints, floats and doubles only
+// RESULT: fminus: --run: 'plan' returns 'fft_plan'; --run prints bools, ints, floats and doubles only
+
+// ERRORS
+int wrong(fft_plan p, void* v)
+{
+    fft_plan q = p + 1;
+    int n = p[0] != v;
+    n += p->size;
+    n += p < q;
+    return n;
+}
+
+// ERR: <stdin>:4:20: error: arithmetic on a pointer to an incomplete type 'struct fminus_fft_plan'
+// ERR: <stdin>:5:14: error: subscript of pointer to incomplete type 'struct fminus_fft_plan'
+// ERR: <stdin>:6:11: error: incomplete definition of type 'struct fminus_fft_plan'
+// ERR: <stdin>:7:12: error: invalid operands to binary expression ('fft_plan' and 'fft_plan')

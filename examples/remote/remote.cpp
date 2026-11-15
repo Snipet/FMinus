@@ -11,9 +11,10 @@
 // second Program in the same process: the page is served by the library, a gain and a note sent over HTTP are heard in
 // the output (the level and the pitch of a second rendered after them), what no route names is answered 404 and 405 by
 // the library, a value out of range is the program's 400, and once the host stops the program's network nothing listens
-// there. Then it compiles the program again with the default policy, under which http_listen listens nowhere
-// (HTTP_REFUSED). Nothing binds anything but 127.0.0.1, and no request leaves the machine. In a build without the web
-// server or the JSON parser (FMINUS_WEB_SERVER is off by default), it says so and exits 0.
+// there. Then the driver's way: run() on a thread, POST /stop, and the program destroyed as soon as run() returns; the
+// client has its 204 all the same. And it compiles the program again with the default policy, under which http_listen
+// listens nowhere (HTTP_REFUSED). Nothing binds anything but 127.0.0.1, and no request leaves the machine. In a build
+// without the web server or the JSON parser (FMINUS_WEB_SERVER is off by default), it says so and exits 0.
 #include "fminus/Config.h"
 #include "fminus/FMinus.h"
 
@@ -55,7 +56,8 @@ int post(int port, int which, int value)
     float none[1] = {0.0f};
     void* r = which == 0 ? http_post("http://127.0.0.1:%d/gain?value=0.5", none, 0, "", port)
             : which == 1 ? http_post("http://127.0.0.1:%d/note/%d", none, 0, "", port, value)
-            : http_post("http://127.0.0.1:%d/gain?value=nan", none, 0, "", port);
+            : which == 2 ? http_post("http://127.0.0.1:%d/gain?value=nan", none, 0, "", port)
+            : http_post("http://127.0.0.1:%d/stop", none, 0, "", port);
     const int status = http_wait(r, 10000);
     http_close(r);
     return status;
@@ -240,6 +242,60 @@ float state(int port, int what)
         return std::fabs(value - expected) <= tolerance;
     }
 
+    // run(30) on a thread of its own, as the driver runs it, POST /stop sent by the library's client, and the program
+    // destroyed on that thread the moment run() returns: the stop's 204 reaches the client, and run() ended at once.
+    int runAndStop(const std::string& path, const fminus::Program::WebServerPolicy& server, std::string& errors)
+    {
+        std::optional<Synth> synth = compileSynth(path, server, errors);
+        if (!synth)
+            return fail(errors);
+        auto* run = synth->program->function<int(float)>("run", errors);
+        if (run == nullptr)
+            return fail("remote.fm has no run(float): " + errors);
+        std::atomic<bool> stopping{false};
+        std::atomic<int> changes{-100};
+        std::atomic<bool> destroyed{false};
+        std::thread driver([&] {
+            changes = run(30.0f);
+            if (stopping.load())
+            {
+                synth->program.reset();   // at once, as the driver does once run() has returned
+                destroyed = true;
+            }
+        });
+        int port = 0;
+        for (int i = 0; i < 5000 && port == 0; ++i)
+        {
+            port = synth->program->webPort();   // run() listens as its instance begins
+            if (port == 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        fminus::Program::Options clientOptions;
+        clientOptions.web.allow = {"http://127.0.0.1:" + std::to_string(port) + "/*"};
+        std::unique_ptr<fminus::Program> client = fminus::Program::compile(kClient, errors, clientOptions);
+        auto* post = client ? client->function<int(int, int, int)>("post", errors) : nullptr;
+        if (port == 0 || post == nullptr)
+        {
+            synth->program->stopWeb();   // ends run(): its server closed
+            driver.join();
+            return fail(port == 0 ? "run() never listened" : "the client: " + errors);
+        }
+        stopping = true;
+        const auto sent = std::chrono::steady_clock::now();
+        const int status = post(port, 3, 0);
+        driver.join();
+        const auto took = std::chrono::steady_clock::now() - sent;
+        if (status != 204)
+            return fail(std::format("POST /stop: {}, not 204: its reply was lost as the program went", status));
+        if (!destroyed.load() || changes.load() != 0 || took > std::chrono::seconds(5))
+            return fail(std::format("POST /stop: run() gave {} and the program {} destroyed {} ms after it, not at "
+                                    "once",
+                                    changes.load(), destroyed.load() ? "was" : "was not",
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(took).count()));
+        std::printf("POST /stop: 204, and run() returned at once; the program was destroyed as soon as it had\n");
+        return 0;
+    }
+
     int runCheck(const std::string& path, const std::string& pageDirectory)
     {
         std::string errors;
@@ -271,8 +327,11 @@ float state(int port, int what)
         // What a host shows, or checks, before it runs anything.
         for (const fminus::Program::WebRoute& route : synth->program->webRoutes())
             std::printf("%s:%d: %s %s\n", route.file.c_str(), route.line, route.method.c_str(), route.pattern.c_str());
-        if (synth->program->webRoutes().size() != 4)
-            return fail("remote.fm should name 4 routes");
+        if (synth->program->webRoutes().size() != 5)
+            return fail("remote.fm should name 5 routes");
+        for (const fminus::Program::RouteParameter& parameter : synth->program->webRoutes()[0].parameters)
+            std::printf("  %s %s, from the %s, %g to %g\n", parameter.type.c_str(), parameter.name.c_str(),
+                        parameter.source.c_str(), parameter.minimum.value_or(0), parameter.maximum.value_or(0));
 
         const auto instance = makeInstance(*synth->module);
         if (!instance)
@@ -351,9 +410,14 @@ float state(int port, int what)
             return fail("after stopWeb(), the port should be HTTP_CANCELLED and webPort() 0");
         if (const int gone = get(port, 0); gone != kTransport)
             return fail(std::format("after stopWeb(), a request gave {}, not HTTP_TRANSPORT (-1)", gone));
+
+        // The driver's way: run() (its own instance, its own serve for POST /stop) on a thread, and the program
+        // destroyed as soon as it returns, maybe before the I/O thread has sent the stop's reply: closing sends it.
+        if (const int ran = runAndStop(path, server, errors); ran != 0)
+            return ran;
         std::printf("checked: the page served by the library; 404 and 405 without the program; a gain and a note sent "
-                    "over HTTP heard in the output; out of range 400; stopped, nothing listens; the default policy "
-                    "listens nowhere\n");
+                    "over HTTP heard in the output; out of range 400; stopped, nothing listens; POST /stop ends run() "
+                    "at once, its 204 sent as the program goes; the default policy listens nowhere\n");
         return 0;
     }
 

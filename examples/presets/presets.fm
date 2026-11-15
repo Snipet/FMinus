@@ -1,0 +1,107 @@
+// examples/presets/presets.fm: a store of named presets a page or a script keeps over HTTP (docs/web.md and
+// docs/files.md; docs/research/syntax/README.md, §8's service, in full). A preset has a name, which the request's path
+// gives (`PUT /presets/warm-pad`), and a body of JSON, `{"gain": 0.5, "cutoff": 1200, "wave": "SAW"}`, read into a
+// module, Preset, by its fields' names: a field missing, of another kind or outside its range is the program's 400, and
+// nothing is written. What is stored is the preset, not whatever was sent: the module written back as JSON,
+// `json (preset)`, as the file presets/<name>.json in the folder its host maps. The name is a string, a route's
+// parameter: a whole segment of the path, filled into the file's name by a hole, `{name}`, where the runtime checks it
+// again (no '/', no leading '.', no device name of Windows: a name it refuses is the program's 400). Its host sees
+// every route and every file it can name before anything runs: each hole a "*".
+//
+// It runs on a thread of the host's, not the audio thread: it parses JSON and writes files, which allocate and wait
+// on the disk, and its serve waits up to 100 ms for a request (a serve with a timeout blocks). It is there only in a
+// build with the web server, the JSON parser and file writing (#ifdef), so the file compiles in every build.
+
+#ifdef __FMINUS_WEB_SERVER__
+#ifdef __FMINUS_JSON__
+#ifdef __FMINUS_FILES_WRITE__
+
+enum Wave { SINE, SAW, SQUARE };
+
+module Preset                                        // what a preset holds, and so what its JSON says
+{
+    float gain [[fminus::range(0, 1)]];
+    float cutoff [[fminus::range(20, 20000)]];
+    enum Wave wave;                                  // "wave": "SAW"
+};
+
+// A preset's body read and stored as presets/<name>.json: the status to answer with. Not JSON, or a field missing, of
+// another kind or out of its range, is 400, and nothing is written; a name the file interface refuses (".hidden",
+// "con") is 400 too; a body that is no JSON by its content type, 415.
+int store(http_request q, string name)
+{
+    if (!string_starts(http_header(q, "content-type"), "application/json"))
+        return 415;
+    json_doc doc = json_parse(http_body(q), http_size(q));
+    defer json_free(doc);
+    Preset preset;
+    if (!json_read(doc, "", &preset))                // a field missing, of another kind or out of its range
+        return 400;
+    switch (file_write("presets/{name}.json", json (preset)))
+    {
+    case FILE_OK:
+        return 204;
+    case FILE_INVALID:
+        return 400;
+    default:
+        return 500;
+    }
+}
+
+// Serves for `seconds` seconds, or until its host closes the server: how many presets were stored; or, when it does
+// not listen, why (HTTP_REFUSED: its host gave it no listen).
+int run(float seconds)
+{
+    http_server server = http_listen();
+    defer http_close(server);
+    if (http_port(server) <= 0)
+        return http_port(server);
+    int stored = 0;
+    for (int tick = 0; tick < (int)(seconds * 10.0f) && http_port(server) > 0; ++tick)
+    {
+        serve (server, 100)   // waits up to 100 ms for a request for one of these routes, then takes all there are
+        {
+            route "PUT /presets/{name}" (string name, http_request q)   // curl -X PUT --json '{...}' .../presets/warm
+            {
+                const int status = store(q, name);
+                stored += status == 204 ? 1 : 0;
+                if (status == 400)
+                    reply 400, json { "error": "a preset is JSON: gain 0 to 1, cutoff 20 to 20000 and a wave, SINE, "
+                                               "SAW or SQUARE, under a name a file may have", "name": name };
+                reply status;
+            }
+            route "POST /presets/{name}" (string name, http_request q)  // the same, for a client that only POSTs
+            {
+                const int status = store(q, name);
+                stored += status == 204 ? 1 : 0;
+                reply status;
+            }
+            route "GET /presets/{name}" (string name)
+            {
+                file_content f = file_read("presets/{name}.json");
+                defer file_close(f);
+                if (file_status(f) != FILE_OK)
+                    reply file_status(f) == FILE_MISSING ? 404 : file_status(f) == FILE_INVALID ? 400 : 500;
+                reply 200, file_data(f), file_size(f), "application/json";
+            }
+            route "GET /presets"
+            {
+                file_listing all = file_list("presets/*.json");
+                defer file_close(all);
+                reply 200, json { "count": file_count(all), "first": file_name(all, 0) };
+            }
+            route "GET /names/{i}" (int i)   // the i-th preset's file, in its names' order: "" past the last
+            {
+                file_listing all = file_list("presets/*.json");
+                defer file_close(all);
+                const string file = file_name(all, i);
+                reply 200, "text/plain", "%s", string_slice(file, 0, string_size(file) - 5);   // without ".json"
+            }
+        }
+    }
+    return stored;
+}
+
+#endif
+#endif
+#endif

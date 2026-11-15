@@ -50,8 +50,9 @@ namespace fminus::ast
     // pointer to a module is C's, and `p->y` its field.
     //
     // An array is C's: `float history[16];`, a fixed number of elements side by side, of a type FMinus can point to
-    // (a float, a double, an int, a float vector or a module). Its name stands for a pointer to its first element, which p[i]
-    // indexes; it cannot be assigned, and a parameter declared as one is that pointer. Its size is an integer constant
+    // (a float, a double, an int, a float vector or a module), or of a handle (below). Its name stands for a pointer to
+    // its first element, which p[i] indexes; it cannot be assigned, and a parameter declared as one is that pointer
+    // (of handles none may be: a pointer to a handle is no parameter's type). Its size is an integer constant
     // expression, `float buf[ROWS * COLS]` (C11 6.6p6: enumeration constants are, a const variable is not), which the
     // code generator works out where the array is declared (the declaration keeps it as written, and the parser's
     // type has a count of 0); `float t[] = {1, 2, 3}` takes its size from its list.
@@ -74,7 +75,50 @@ namespace fminus::ast
     // warning). It is no part of the type's identity, which == compares without it, so every rule for an int holds for
     // an `enum Mode` as it did, and messages say 'int'. A value keeps it where C keeps the enumerated type (a variable,
     // a field, a parameter, a result, a cast, an assignment), and loses it where C promotes it: `mode + 1` is an int.
+    //
+    // A handle is one of the runtime's objects, which a builtin gives and others take: `http_response`, a request the
+    // program made; `http_request`, one it received; `http_server`; `json_doc` and `xml_doc`, parsed documents;
+    // `file_content`, a file read whole; `file_listing`, a folder's files; and `fft_plan`. Each is C's opaque handle,
+    // `typedef struct fminus_http_response* http_response;`, a pointer to a struct the program never sees: a ptr in
+    // LLVM, as the void* it replaces was. A handle converts to a void* and a void* to any handle, as C's void* does;
+    // two kinds of handle convert to neither. A program declares one, assigns it, compares two of a kind with == and
+    // != (or one with a void*), tests one as a condition (null is false) and keeps one in an array; it has no
+    // arithmetic, no element and no field, and no pointer to one (FMinus has no pointers to pointers). `handle` says
+    // which, for a handle's type, or a pointer's or an array's whose pointee is one (an array of handles' name stands
+    // for a pointer to its first, which only that array gives).
+    //
+    // A string is FMinus's, not C's: a read-only view of bytes something else owns, a pointer and a length (in C,
+    // `typedef struct { const char* data; int size; } string;`), {ptr, i32} in LLVM, 16 bytes aligned to 8. No NUL
+    // follows its bytes and no encoding is checked. A string literal is one wherever a string is wanted (an
+    // initialiser, an assignment, an argument, an operand of == or !=, a case of a switch on a string), its bytes a
+    // constant of the program. Two compare with == and != by content; nothing joins, orders or indexes them (the
+    // string_* builtins read one). A declaration without an initialiser is the empty string, a null pointer and 0. It
+    // lives as long as what it points into, which the compiler does not check (README.md). Arrays of strings are
+    // allowed, as of handles: an array's name stands for a pointer to its first, which no variable can hold.
+    //
+    // char is an array's element type and a pointer's pointee only, a byte: `char name[32];`, `const char* p`. No
+    // variable, parameter or result is a char; an element read, name[i] or *p, is an int from 0 to 255 on every machine
+    // (C leaves a plain char's sign to the implementation: FMinus's is unsigned, as clang's -funsigned-char makes it),
+    // and a store keeps the low 8 bits.
     struct Module;
+
+    enum class Handle
+    {
+        None,
+        HttpResponse,   // http_response: http_get's and http_post's
+        HttpRequest,    // http_request: http_next's and http_accept's
+        HttpServer,     // http_server: http_listen's
+        JsonDoc,        // json_doc: json_parse's
+        XmlDoc,         // xml_doc: xml_parse's
+        FileContent,    // file_content: file_read's and file_read_nth's
+        FileListing,    // file_listing: file_list's
+        FftPlan,        // fft_plan: fft_create's and fft_create_complex's
+    };
+
+    // A handle type's name, as a program writes it ("http_response"), and the struct C's typedef would point to, as
+    // clang names it in a message about an incomplete type ("struct fminus_http_response").
+    const char* handleName(Handle handle);
+    std::string handleStruct(Handle handle);
 
     enum class Kind
     {
@@ -94,6 +138,9 @@ namespace fminus::ast
         Pointer,
         Module,
         Array,
+        Handle,
+        Char,     // a byte: an array's element or a pointer's pointee only
+        String,   // a read-only view of bytes: a pointer and a length
     };
 
     struct Type
@@ -109,12 +156,14 @@ namespace fminus::ast
                                // for none (above: not part of the type's identity)
         Kind rowKind = Kind::Void;   // when the pointee is a row (Kind::Array): what the row's elements are
         int rowCount = 0;            // and how many it has (0 in the syntax tree, as `count`)
+        Handle handle = Handle::None;   // a handle's: which; or the handles' a pointer, an array or a row holds
 
         constexpr Type() = default;
         constexpr Type(Kind kind) : kind(kind) {}   // implicit: Kind::Float is the type float
 
-        // A pointer to `pointee`, which is a kind or a module type, or a row: a one-dimensional array, what a 2-D
-        // array's name stands for a pointer to (FMinus has no pointers to pointers).
+        // A pointer to `pointee`, which is a kind, a module type or a handle type, or a row: a one-dimensional array,
+        // what a 2-D array's name stands for a pointer to (FMinus has no pointers to pointers, and a pointer to a
+        // handle is only what an array of handles' name stands for).
         static constexpr Type pointerTo(Type pointee, bool isConst)
         {
             Type type(Kind::Pointer);
@@ -122,11 +171,20 @@ namespace fminus::ast
             type.module = pointee.module;
             type.pointeeConst = isConst;
             type.enumeration = pointee.enumeration;
+            type.handle = pointee.handle;
             if (pointee.kind == Kind::Array)
             {
                 type.rowKind = pointee.pointee;
                 type.rowCount = pointee.count;
             }
+            return type;
+        }
+
+        // The handle type `handle` (http_response, ...).
+        static constexpr Type handleType(Handle handle)
+        {
+            Type type(Kind::Handle);
+            type.handle = handle;
             return type;
         }
 
@@ -153,6 +211,7 @@ namespace fminus::ast
             type.module = element.module;
             type.count = count;
             type.enumeration = element.enumeration;
+            type.handle = element.handle;
             if (element.kind == Kind::Array)
             {
                 type.rowKind = element.pointee;
@@ -166,11 +225,12 @@ namespace fminus::ast
         {
             return a.kind == b.kind && a.pointee == b.pointee && a.pointeeConst == b.pointeeConst
                    && a.module == b.module && a.count == b.count && a.rowKind == b.rowKind
-                   && a.rowCount == b.rowCount;
+                   && a.rowCount == b.rowCount && a.handle == b.handle;
         }
 
         static const Type Void, Float, Double, Bool, Int, Float2, Float4, Float8, Bool2, Bool4, Bool8, PolyFloat,
             PolyBool;
+        static const Type Char, String;
     };
 
     inline constexpr Type Type::Void{Kind::Void};
@@ -186,6 +246,8 @@ namespace fminus::ast
     inline constexpr Type Type::Bool8{Kind::Bool8};
     inline constexpr Type Type::PolyFloat{Kind::PolyFloat};
     inline constexpr Type Type::PolyBool{Kind::PolyBool};
+    inline constexpr Type Type::Char{Kind::Char};
+    inline constexpr Type Type::String{Kind::String};
 
     inline bool isPoly(Type type)
     {
@@ -209,6 +271,9 @@ namespace fminus::ast
         case Kind::Pointer:
         case Kind::Module:
         case Kind::Array:
+        case Kind::Handle:
+        case Kind::Char:
+        case Kind::String:
             return 1;
         case Kind::Float2:
         case Kind::Bool2:
@@ -243,6 +308,11 @@ namespace fminus::ast
         return type.kind == Kind::Array;
     }
 
+    inline bool isHandle(Type type)
+    {
+        return type.kind == Kind::Handle;
+    }
+
     // What a pointer of `type` points to, or what the elements of an array of `type` are: a row, for a 2-D array's.
     inline Type pointee(Type type)
     {
@@ -253,11 +323,14 @@ namespace fminus::ast
             row.count = type.rowCount;
             row.module = type.module;
             row.enumeration = type.enumeration;
+            row.handle = type.handle;
             return row;
         }
         Type element(type.pointee);
         if (type.pointee == Kind::Module)
             element.module = type.module;
+        if (type.pointee == Kind::Handle)
+            element.handle = type.handle;
         element.enumeration = type.enumeration;
         return element;
     }
@@ -276,11 +349,26 @@ namespace fminus::ast
         return hasRows(type) ? pointee(element) : element;
     }
 
-    // Whether FMinus has pointers to `kind`: to float, double, int, float2, float4, float8, void and modules.
+    // Whether FMinus has pointers to `kind`: to float, double, int, float2, float4, float8, char, void and modules.
     inline bool canPointTo(Kind kind)
     {
         return kind == Kind::Float || kind == Kind::Double || kind == Kind::Int || kind == Kind::Float2
-               || kind == Kind::Float4 || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module;
+               || kind == Kind::Float4 || kind == Kind::Float8 || kind == Kind::Void || kind == Kind::Module
+               || kind == Kind::Char;
+    }
+
+    // Whether an array may hold elements of `kind`: what FMinus can point to but void, and handles and strings, which
+    // no program can point to but an array's name stands for a pointer to (FMinus's one way to keep several).
+    inline bool canBeElement(Kind kind)
+    {
+        return (canPointTo(kind) && kind != Kind::Void) || kind == Kind::Handle || kind == Kind::String;
+    }
+
+    // Whether what a pointer of `type` points to, or an array of it holds, is a handle or a string: what only an
+    // array's name points to, and no variable.
+    inline bool pointsToView(Type type)
+    {
+        return type.pointee == Kind::Handle || type.pointee == Kind::String;
     }
 
     // Whether `type` is one of C's floating types, float or double: what `x != 0` tests as a float, and what converts
@@ -294,14 +382,16 @@ namespace fminus::ast
     // same row for rows.
     inline bool samePointee(Type a, Type b)
     {
-        return a.pointee == b.pointee && a.module == b.module && a.rowKind == b.rowKind && a.rowCount == b.rowCount;
+        return a.pointee == b.pointee && a.module == b.module && a.rowKind == b.rowKind && a.rowCount == b.rowCount
+               && a.handle == b.handle;
     }
 
     // Whether a value of `type` takes part in arithmetic: every type's but void's, a pointer's (whose arithmetic is
-    // its own), a module's and an array's.
+    // its own), a module's, an array's, a handle's and a string's (which have none).
     inline bool isArithmetic(Type type)
     {
-        return type != Type::Void && !isPointer(type) && !isModule(type) && !isArray(type);
+        return type != Type::Void && !isPointer(type) && !isModule(type) && !isArray(type) && !isHandle(type)
+               && type != Type::String;
     }
 
     inline bool isMask(Type type)
@@ -425,9 +515,9 @@ namespace fminus::ast
 
     // A string literal, C's adjacent ones joined (`"Cut" "off"` is "Cutoff"): its bytes, C's escapes resolved (a NUL
     // among them, `"a\0b"`, is a byte like any other), and where each byte is spelt, at its character or at its
-    // escape's backslash, for an error about a place inside it (a format's '%': ir/Strings.cpp). FMinus has no string
-    // type: a literal is only the argument of a builtin's string parameter, which the code generator checks
-    // (ir/Calls.cpp); anywhere else it is an error.
+    // escape's backslash, for an error about a place inside it (a format's '%': ir/Strings.cpp). A literal is the
+    // argument of a builtin's string parameter, which the code generator checks (ir/Calls.cpp), or a value of type
+    // string where one is wanted (Type::String); anywhere else it is an error.
     struct StringExpr
     {
         std::string value;
@@ -571,6 +661,35 @@ namespace fminus::ast
         ExprPtr operand;
     };
 
+    // A JSON literal's value: an expression (a number, a bool, a string, an enumeration's value, a vector, an array,
+    // a module or json_slice(a, n), which the code generator checks), an object, `{ "gain": gain, pitch }`, whose
+    // members are keys and values (a bare name is its own key and its value), or an array, `[a, b, c]`. FMinus's own,
+    // not C's: docs/web.md, "The JSON literal".
+    struct JsonValue
+    {
+        enum class Kind
+        {
+            Value,
+            Object,
+            Array,
+        };
+        SourceLocation location;                   // the expression's, or its `{` or `[`
+        Kind kind = Kind::Value;
+        ExprPtr value;                             // a Value's
+        std::vector<StringExpr> keys;              // an Object's, its members' keys in order (adjacent literals one)
+        std::vector<SourceLocation> keyLocations;
+        std::vector<JsonValue> elements;           // an Object's members' values, in order, or an Array's values
+    };
+
+    // `json { "gain": gain }`, `json [a, b]` or `json (preset)` (one value, its Value): a JSON literal, which, as a
+    // string literal, is an expression to the grammar and only an argument to the code generator: a reply's body
+    // (`reply 200, json { ... };`, http_reply_json), a POST's (http_post) or a file's (file_write, file_append), never
+    // a value. The dump writes the last `(json preset)`.
+    struct JsonExpr
+    {
+        JsonValue value;
+    };
+
     // An expression, where the tree places it (an operator written after its first operand at the operator: `a + b` at
     // `+`), and, when the source parenthesises it, `(e)`, where its outermost opening parenthesis is: the tree keeps no
     // node for the parentheses, and a diagnostic about the whole expression begins there, as clang's does
@@ -580,7 +699,7 @@ namespace fminus::ast
         SourceLocation location;
         std::variant<NumberExpr, VariableExpr, BoolExpr, UnaryExpr, BinaryExpr, LogicalExpr, CallExpr, AssignExpr,
                      ConditionalExpr, ConstructExpr, MemberExpr, MethodCallExpr, ThisExpr, IncrementExpr, CastExpr,
-                     IndexExpr, SizeofExpr, StringExpr>
+                     IndexExpr, SizeofExpr, StringExpr, JsonExpr>
             node;
         std::optional<SourceLocation> opening = std::nullopt;
     };
@@ -664,12 +783,17 @@ namespace fminus::ast
 
     using StmtPtr = std::unique_ptr<Stmt>;
 
-    // `if (condition) thenBranch [else elseBranch]`. A float condition is `!= 0`, as in C.
+    // `if (condition) thenBranch [else elseBranch]`. A float condition is `!= 0`, as in C. C2y's (N3356) declaration in
+    // its head, `if (int n = count(); n > 0)`, is `init`, its names in scope from their declaration to the end of the
+    // whole statement, the else branch included, and no further. Its third form, `if (json_doc doc = json_parse(...))`,
+    // one declarator with an initialiser, is the second with the declared name for its condition, as C2y rewrites it
+    // (N3580): `if (json_doc doc = json_parse(...); doc)`.
     struct IfStmt
     {
         ExprPtr condition;
         StmtPtr thenBranch;
         StmtPtr elseBranch;   // null without an else
+        std::vector<Stmt> init;   // its head's declarations, in order, or none
     };
 
     struct WhileStmt
@@ -699,11 +823,13 @@ namespace fminus::ast
     // `switch (value) body`: C's. The value is an int (a bool is one, as C promotes it), and the body, usually a
     // block, holds the labels the switch jumps to by the value: `case 1:` and `default:`, wherever they are in it (in
     // a block or a loop inside it too). From one label's statements, control falls into the next's; `break` leaves
-    // the switch, and `continue` goes to the loop around it.
+    // the switch, and `continue` goes to the loop around it. Its head may declare, as an if's (IfStmt): `switch (int k
+    // = next(); k)`, or `switch (int k = next())`.
     struct SwitchStmt
     {
         ExprPtr value;
         StmtPtr body;
+        std::vector<Stmt> init;   // its head's declarations, in order, or none
     };
 
     // `case value:`, a label of the switch around it, whose value is an integer constant expression (C11 6.6p6:
@@ -778,11 +904,91 @@ namespace fminus::ast
         std::vector<Stmt> tasks;
     };
 
+    // `defer statement;`, ISO/IEC TS 25755's (`_Defer`, which FMinus also spells `defer`): reaching it runs nothing;
+    // its statement, the deferred block, runs when control leaves the block the defer is in: at its end, or by
+    // return, break or continue, the defers of a block in the reverse of the order they were reached, the innermost
+    // block's first. A return's value is computed, and converted, before any of them runs; nothing is captured, so the
+    // deferred statement reads its variables when it runs. The statement is a block of its own, which may hold
+    // another defer, and which no return, and no break or continue to outside it, may leave.
+    struct DeferStmt
+    {
+        StmtPtr body;
+    };
+
+    // A route's parameter, `float value [[fminus::range(0, 1)]]`: an int a hole of its path fills (`{note}`), an int,
+    // a float or a bool the query's field of its name fills, or the request itself, an http_request. A const variable
+    // of the route's block.
+    struct RouteParam
+    {
+        SourceLocation location;   // of its name
+        std::string name;
+        Type type = Type::Int;
+        bool isConst = false;      // written so; every route parameter is const all the same
+        std::vector<Attribute> attributes;   // fminus::range and fminus::default, as a module parameter's
+    };
+
+    // `route "POST /note/{note}" (int note [[fminus::range(0, 127)]]) { ... }`, a serve's: a route literal, whose
+    // holes `{name}` are its parameters' (a %d to the library), its parameters, and a block of the function around the
+    // serve, which every path through must leave by a reply.
+    struct Route
+    {
+        SourceLocation location;               // of `route`
+        StringExpr literal;                    // as written, its holes and all
+        SourceLocation literalLocation;        // where it begins
+        bool hasParams = false;                // a parameter list is written, `()` too
+        std::vector<RouteParam> params;
+        std::vector<Attribute> attributes;     // after the parameter list: the code generator's error
+        std::vector<Stmt> body;
+        SourceLocation closing;                // its block's closing brace
+    };
+
+    // `serve (server) { routes }` and `serve (server, timeout_ms) { routes }`: FMinus's, not C's. It takes each request
+    // waiting for one of its routes, oldest first, and runs that route's block, until none waits; with a timeout it
+    // first waits up to that long for one (it blocks, as http_accept does). Its routes' blocks are blocks of the
+    // function it is in.
+    struct ServeStmt
+    {
+        std::vector<ExprPtr> args;      // the server, and the timeout if written (the code generator checks how many)
+        std::vector<Route> routes;
+    };
+
+    // `reply status;`, `reply status, more...;`: answers the route's request (as http_reply, http_reply_bytes,
+    // http_reply_text, or a JSON literal) and leaves the route, as return leaves a function.
+    struct ReplyStmt
+    {
+        std::vector<ExprPtr> args;
+    };
+
+    // `when (condition) statement`: FMinus's, not C's. It runs the statement when the condition is true and was false
+    // the last time this `when` was reached (or it was never reached): `if (c && !was) statement; was = c;`, the
+    // condition computed once and `was` stored before the statement runs, so leaving it (return, break, continue) does
+    // not arm it again. `was` is the compiler's, a bool of the module's instance after its declared fields, one for
+    // each `when`: so a `when` is a method's statement, refused where it would change its module at once from several
+    // threads (a parallel region), and a rising edge each time round a loop (`for (...) when (gate[i] > 0.5f) ...`).
+    struct WhenStmt
+    {
+        ExprPtr condition;
+        StmtPtr body;
+    };
+
+    // `within (milliseconds) { ... }`: FMinus's, not C's, a deadline scope for the web client's requests. The
+    // milliseconds (an int, computed once where the block begins; negative: no deadline of its own) bound the block:
+    // where it ends, every request the thread running it started in it, in the block or in a function it called, has
+    // ended, those still pending at the deadline cancelled (HTTP_TIMEOUT); and the deadline bounds every wait in it
+    // (http_wait, http_accept, a serve with a timeout). Leaving it by return, break, continue or a reply does the same
+    // first, as its end does. Its body is a block, braces required.
+    struct WithinStmt
+    {
+        ExprPtr timeout;
+        StmtPtr body;   // a BlockStmt
+    };
+
     struct Stmt
     {
         SourceLocation location;
         std::variant<DeclStmt, ExprStmt, ReturnStmt, BlockStmt, EmptyStmt, IfStmt, WhileStmt, ForStmt, BreakStmt,
-                     ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, EnumStmt, ParallelForStmt, ParallelBlockStmt>
+                     ContinueStmt, SwitchStmt, CaseStmt, DefaultStmt, EnumStmt, ParallelForStmt, ParallelBlockStmt,
+                     DeferStmt, ServeStmt, ReplyStmt, WhenStmt, WithinStmt>
             node;
     };
 

@@ -1,0 +1,10 @@
+# The examples that use a feature a build may leave out compile in every build: each keeps what needs the feature
+# inside an #ifdef of its macro (__FMINUS_JSON__, __FMINUS_FILES__, __FMINUS_WEB_SERVER__, ...), so in a build without
+# it the file is a module with less in it, or none of its own, and no error. This test runs in every build; the trees
+# that leave features out (docs/testing.md, "Builds that leave features out") are where it says something.
+# RUN: fminus %S/../../../examples/settings/settings.fm -o %t.settings.ll
+# RUN: fminus %S/../../../examples/wavetable/wavetable.fm -o %t.wavetable.ll
+# RUN: fminus %S/../../../examples/fetch/fetch.fm -o %t.fetch.ll
+# RUN: fminus %S/../../../examples/kit/kit.fm -o %t.kit.ll
+# RUN: fminus %S/../../../examples/remote/remote.fm -o %t.remote.ll
+# RUN: fminus %S/../../../examples/presets/presets.fm -o %t.presets.ll

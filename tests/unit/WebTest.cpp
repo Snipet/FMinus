@@ -903,6 +903,13 @@ namespace
                 while (!connection.gone())
                     std::this_thread::sleep_for(5ms);
             }
+            else if (path.starts_with("/after/"))   // a response N milliseconds after the request
+            {
+                const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::stoi(path.substr(7)));
+                while (!connection.gone() && std::chrono::steady_clock::now() < until)
+                    std::this_thread::sleep_for(2ms);
+                reply(200, "", "late");
+            }
             else if (path == "/loop")
                 reply(302, "Location: /loop\r\n", "");
             else if (path.starts_with("/redirect/"))
@@ -1343,7 +1350,6 @@ TEST_CASE("destroying a context while threads wait on its requests wakes them, t
         for (int i = 0; i < 4; ++i)
             requests.push_back(get(*context, server.url("/slow")));
         std::atomic<int> cancelled{0};
-        std::atomic<int> waiting{0};
         std::vector<std::thread> waiters;
         for (void* request : requests)
         {
@@ -1352,14 +1358,21 @@ TEST_CASE("destroying a context while threads wait on its requests wakes them, t
                 waiters.emplace_back(
                     [&, request]
                     {
-                        ++waiting;
                         if (fminus_web_http_wait(request, -1) == FMINUS_WEB_CANCELLED)
                             ++cancelled;
                     });
             }
         }
-        REQUIRE(eventually([&] { return waiting.load() == 8; }));
-        std::this_thread::sleep_for(10ms);   // into the wait
+        // Every thread inside the library's wait, counted by the context: only then may it be destroyed (a wait that
+        // begins after ~Context has would read freed memory).
+        void* handle = context->handle();
+        if (!eventually([&] { return fminus::web::waitingThreads(handle) == 8; }))
+        {
+            context->stop();   // a thread that never got there must not be left waiting
+            for (std::thread& waiter : waiters)
+                waiter.join();
+            FAIL("the eight threads never all waited: " << fminus::web::waitingThreads(handle));
+        }
         context.reset();
         for (std::thread& waiter : waiters)
             waiter.join();
@@ -1451,6 +1464,351 @@ TEST_CASE("close and cancel racing completion", "[web][http][lifetime]")
     }
     INFO(done << " done, " << cancelled << " cancelled");
     SUCCEED();
+}
+
+// ---- deadline scopes: a within block's library -------------------------------------------------------------------
+
+namespace
+{
+    std::int32_t within(Context& context, std::int32_t timeoutMs)
+    {
+        return fminus_web_http_within_begin(context.handle(), timeoutMs);
+    }
+
+    std::int32_t endWithin(Context& context)
+    {
+        return fminus_web_http_within_end(context.handle());
+    }
+
+    std::chrono::milliseconds since(std::chrono::steady_clock::time_point start)
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    }
+} // namespace
+
+TEST_CASE("a deadline scope waits for the requests that joined it, then ends what is left as HTTP_TIMEOUT",
+          "[web][http][within]")
+{
+    Server server;
+    auto context = makeContext(loopback());
+    // Some end in time, one never does: the end waits until the deadline, then times it out.
+    auto start = std::chrono::steady_clock::now();
+    REQUIRE(within(*context, 400) == 0);
+    void* ok = get(*context, server.url("/ok"));
+    void* late = get(*context, server.url("/after/100"));
+    void* slow = get(*context, server.url("/slow"));
+    CHECK(endWithin(*context) == FMINUS_WEB_TIMEOUT);
+    CHECK(since(start) >= 390ms);
+    CHECK(since(start) < 3s);
+    CHECK(fminus_web_http_status(ok) == 200);
+    CHECK(fminus_web_http_status(late) == 200);
+    CHECK(body(late) == "late");
+    CHECK(fminus_web_http_status(slow) == FMINUS_WEB_TIMEOUT);   // time ended it, not the program
+    CHECK(fminus_web_http_body(slow) == nullptr);
+    CHECK(eventually([&] { return server.open() == 0; }));      // its connection is gone
+    for (void* request : {ok, late, slow})
+        fminus_web_http_close(request);
+
+    // All of them in time: the end returns when the last has, long before the deadline.
+    start = std::chrono::steady_clock::now();
+    REQUIRE(within(*context, 10000) == 0);
+    std::vector<void*> requests;
+    for (int i = 0; i < 4; ++i)
+        requests.push_back(get(*context, server.url("/after/" + std::to_string(50 + 50 * i))));
+    CHECK(endWithin(*context) == 0);
+    CHECK(since(start) >= 190ms);
+    CHECK(since(start) < 3s);
+    for (void* request : requests)
+    {
+        CHECK(fminus_web_http_status(request) == 200);
+        fminus_web_http_close(request);
+    }
+
+    // No deadline of its own: the end waits for them all, however long.
+    REQUIRE(within(*context, -1) == 0);
+    void* afterwards = get(*context, server.url("/after/300"));
+    start = std::chrono::steady_clock::now();
+    CHECK(endWithin(*context) == 0);
+    CHECK(since(start) >= 250ms);
+    CHECK(fminus_web_http_status(afterwards) == 200);
+    fminus_web_http_close(afterwards);
+
+    // A request started before the scope did not join it; one the program closed is not its concern; a refused one
+    // ended before the end.
+    void* before = get(*context, server.url("/slow"));
+    start = std::chrono::steady_clock::now();
+    REQUIRE(within(*context, 2000) == 0);
+    void* closed = get(*context, server.url("/slow"));
+    fminus_web_http_close(closed);
+    void* refused = get(*context, "http://example.com/");
+    CHECK(fminus_web_http_status(refused) == FMINUS_WEB_REFUSED);
+    CHECK(endWithin(*context) == 0);
+    CHECK(since(start) < 1s);
+    CHECK(fminus_web_http_status(before) == FMINUS_WEB_PENDING);
+    fminus_web_http_close(before);
+    fminus_web_http_close(refused);
+
+    // An end with no scope open does nothing; a null context (a program given no network) has nothing to wait for.
+    CHECK(endWithin(*context) == FMINUS_WEB_INVALID);
+    CHECK(fminus_web_http_within_begin(nullptr, 100) == 0);
+    CHECK(fminus_web_http_within_end(nullptr) == 0);
+
+    // A scope whose deadline has passed already: its requests are timed out at its end, whatever their own time.
+    REQUIRE(within(*context, 0) == 0);
+    void* instant = get(*context, server.url("/slow"));
+    CHECK(endWithin(*context) == FMINUS_WEB_TIMEOUT);
+    CHECK(fminus_web_http_status(instant) == FMINUS_WEB_TIMEOUT);
+    fminus_web_http_close(instant);
+}
+
+TEST_CASE("a deadline scope keeps the policy's own limits on each request", "[web][http][within]")
+{
+    Server server;
+    Policy policy = loopback();
+    policy.timeoutMs = 200;
+    policy.maxRequests = 2;
+    auto context = makeContext(policy);
+    REQUIRE(within(*context, -1) == 0);
+    void* first = get(*context, server.url("/slow"));
+    void* second = get(*context, server.url("/slow"));
+    void* third = get(*context, server.url("/ok"));
+    CHECK(fminus_web_http_status(third) == FMINUS_WEB_LIMIT);
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(endWithin(*context) == 0);   // the policy's timeout ended them, not the scope
+    CHECK(since(start) < 3s);
+    CHECK(fminus_web_http_status(first) == FMINUS_WEB_TIMEOUT);
+    CHECK(fminus_web_http_status(second) == FMINUS_WEB_TIMEOUT);
+}
+
+TEST_CASE("deadline scopes nest: the earlier deadline, the innermost scope, and the thread's waits bounded",
+          "[web][http][within]")
+{
+    Server server;
+    auto context = makeContext(loopback());
+    // An inner scope's deadline is the earlier of its own and the enclosing one's, and it bounds http_wait.
+    auto start = std::chrono::steady_clock::now();
+    REQUIRE(within(*context, 300) == 0);
+    REQUIRE(within(*context, 10000) == 0);
+    void* inner = get(*context, server.url("/slow"));
+    CHECK(fminus_web_http_wait(inner, -1) == FMINUS_WEB_PENDING);   // what a wait returns on its own timeout
+    CHECK(since(start) >= 290ms);
+    CHECK(since(start) < 2s);
+    CHECK(fminus_web_http_wait(inner, 5000) == FMINUS_WEB_PENDING);   // passed: at once
+    CHECK(since(start) < 2s);
+    CHECK(endWithin(*context) == FMINUS_WEB_TIMEOUT);
+    CHECK(fminus_web_http_status(inner) == FMINUS_WEB_TIMEOUT);
+    CHECK(endWithin(*context) == 0);   // the outer scope: its request was the inner's
+    fminus_web_http_close(inner);
+
+    // A request belongs to the innermost scope open when it started; a wait's own shorter timeout still counts.
+    start = std::chrono::steady_clock::now();
+    REQUIRE(within(*context, 600) == 0);
+    void* outer = get(*context, server.url("/slow"));
+    REQUIRE(within(*context, 100) == 0);
+    void* deeper = get(*context, server.url("/slow"));
+    CHECK(endWithin(*context) == FMINUS_WEB_TIMEOUT);
+    CHECK(since(start) >= 90ms);
+    CHECK(since(start) < 500ms);
+    CHECK(fminus_web_http_status(deeper) == FMINUS_WEB_TIMEOUT);
+    CHECK(fminus_web_http_status(outer) == FMINUS_WEB_PENDING);
+    const auto waited = std::chrono::steady_clock::now();
+    CHECK(fminus_web_http_wait(outer, 50) == FMINUS_WEB_PENDING);
+    CHECK(since(waited) < 400ms);
+    CHECK(endWithin(*context) == FMINUS_WEB_TIMEOUT);
+    CHECK(since(start) >= 590ms);
+    CHECK(fminus_web_http_status(outer) == FMINUS_WEB_TIMEOUT);
+    fminus_web_http_close(outer);
+    fminus_web_http_close(deeper);
+
+    // An inner scope with no deadline of its own takes the enclosing one's; a longer one of its own does not
+    // outlast it.
+    start = std::chrono::steady_clock::now();
+    REQUIRE(within(*context, 200) == 0);
+    REQUIRE(within(*context, -1) == 0);
+    void* unbounded = get(*context, server.url("/slow"));
+    CHECK(endWithin(*context) == FMINUS_WEB_TIMEOUT);
+    CHECK(since(start) < 1s);
+    CHECK(endWithin(*context) == 0);
+    fminus_web_http_close(unbounded);
+
+    // Outside every scope, a wait is as it was.
+    void* outside = get(*context, server.url("/slow"));
+    start = std::chrono::steady_clock::now();
+    CHECK(fminus_web_http_wait(outside, 150) == FMINUS_WEB_PENDING);
+    CHECK(since(start) >= 140ms);
+    fminus_web_http_close(outside);
+}
+
+TEST_CASE("a deadline scope is the calling thread's and the context's alone", "[web][http][within]")
+{
+    Server server;
+    auto context = makeContext(loopback());
+    auto other = makeContext(loopback());
+    // Another thread's requests, under the same context, do not join this thread's scope, nor are its waits bounded
+    // by it.
+    REQUIRE(within(*context, 100) == 0);
+    void* theirs = nullptr;
+    std::chrono::milliseconds theirWait{0};
+    std::int32_t theirStatus = -100;
+    std::int32_t theirEnd = -100;
+    const std::string slowUrl = server.url("/slow");   // Catch2's macros stay on this thread
+    std::thread thread([&] {
+        theirs = fminus_web_http_get(context->handle(), slowUrl.data(), static_cast<std::int32_t>(slowUrl.size()),
+                                     nullptr, 0);
+        const auto start = std::chrono::steady_clock::now();
+        theirStatus = fminus_web_http_wait(theirs, 400);
+        theirWait = since(start);
+        theirEnd = fminus_web_http_within_end(context->handle());   // no scope of its own there
+    });
+    thread.join();
+    CHECK(theirStatus == FMINUS_WEB_PENDING);
+    CHECK(theirWait >= 390ms);
+    CHECK(theirEnd == FMINUS_WEB_INVALID);
+    // Nor do requests under another context, nor are waits there bounded.
+    void* elsewhere = get(*other, server.url("/slow"));
+    auto start = std::chrono::steady_clock::now();
+    CHECK(fminus_web_http_wait(elsewhere, 300) == FMINUS_WEB_PENDING);
+    CHECK(since(start) >= 290ms);
+    CHECK(endWithin(*other) == FMINUS_WEB_INVALID);   // no scope of this thread's there
+    start = std::chrono::steady_clock::now();
+    CHECK(endWithin(*context) == 0);   // nothing joined it, and the other thread's end did not end it
+    CHECK(since(start) < 1s);
+    CHECK(fminus_web_http_status(theirs) == FMINUS_WEB_PENDING);
+    CHECK(fminus_web_http_status(elsewhere) == FMINUS_WEB_PENDING);
+    fminus_web_http_close(theirs);
+    fminus_web_http_close(elsewhere);
+
+    // Two threads, each with its own scope and its own requests, at once.
+    std::atomic<int> right{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; ++t)
+        threads.emplace_back([&, t] {
+            const std::int32_t deadline = t % 2 == 0 ? 200 : 5000;
+            if (fminus_web_http_within_begin(context->handle(), deadline) != 0)
+                return;
+            void* fast = get(*context, server.url("/ok"));
+            void* hung = t % 2 == 0 ? get(*context, server.url("/slow")) : nullptr;
+            const std::int32_t ended = fminus_web_http_within_end(context->handle());
+            const bool ok = fminus_web_http_status(fast) == 200 &&
+                            (hung == nullptr ? ended == 0
+                                             : ended == FMINUS_WEB_TIMEOUT &&
+                                                   fminus_web_http_status(hung) == FMINUS_WEB_TIMEOUT);
+            if (ok)
+                right.fetch_add(1);
+            fminus_web_http_close(fast);
+            fminus_web_http_close(hung);
+        });
+    for (std::thread& t : threads)
+        t.join();
+    CHECK(right.load() == 4);
+}
+
+TEST_CASE("stop and destruction wake a thread at a scope's end; a scope left open leaks nothing",
+          "[web][http][within][lifetime]")
+{
+    Server server;
+    SECTION("Context::stop")
+    {
+        auto context = makeContext(loopback());
+        std::int32_t ended = -100;
+        std::int32_t statuses[2] = {-100, -100};
+        std::thread thread([&] {
+            within(*context, -1);
+            void* a = get(*context, server.url("/slow"));
+            void* b = get(*context, server.url("/slow"));
+            ended = endWithin(*context);
+            statuses[0] = fminus_web_http_status(a);
+            statuses[1] = fminus_web_http_status(b);
+        });
+        // In the end's wait, counted by the context (a stop before it would end the block all the same, but not by
+        // waking it).
+        const bool inside = eventually([&] { return fminus::web::waitingThreads(context->handle()) == 1; });
+        const auto start = std::chrono::steady_clock::now();
+        context->stop();
+        thread.join();
+        REQUIRE(inside);
+        CHECK(since(start) < 2s);
+        CHECK(ended == FMINUS_WEB_CANCELLED);
+        CHECK(statuses[0] == FMINUS_WEB_CANCELLED);
+        CHECK(statuses[1] == FMINUS_WEB_CANCELLED);
+        // A scope begun after the stop: its requests are cancelled at once, and its end does not wait.
+        REQUIRE(within(*context, -1) == 0);
+        void* after = get(*context, server.url("/ok"));
+        CHECK(fminus_web_http_status(after) == FMINUS_WEB_CANCELLED);
+        CHECK(endWithin(*context) == FMINUS_WEB_CANCELLED);
+    }
+    SECTION("~Context")
+    {
+        for (int round = 0; round < 3; ++round)
+        {
+            auto context = makeContext(loopback());
+            void* handle = context->handle();
+            std::int32_t ended = -100;
+            std::thread thread([&] {
+                fminus_web_http_within_begin(handle, -1);
+                fminus_web_http_get(handle, server.url("/slow").data(),
+                                    static_cast<std::int32_t>(server.url("/slow").size()), nullptr, 0);
+                ended = fminus_web_http_within_end(handle);   // woken by the destruction; touches nothing after
+            });
+            // In the end's wait, counted by the context: only then may it be destroyed (an end that begins after
+            // ~Context has would read freed memory).
+            if (!eventually([&] { return fminus::web::waitingThreads(handle) == 1; }))
+            {
+                context->stop();
+                thread.join();
+                FAIL("the thread never reached its scope's end");
+            }
+            context.reset();
+            thread.join();
+            CHECK(ended == FMINUS_WEB_CANCELLED);
+        }
+        CHECK_FALSE(fminus::web::ioThreadRunning());
+    }
+    SECTION("left open")
+    {
+        // Scopes never ended, on this thread and on one that has gone, with requests in flight: freed with the
+        // context (a build with AddressSanitizer reports anything that is not).
+        auto context = makeContext(loopback());
+        REQUIRE(within(*context, 5000) == 0);
+        REQUIRE(within(*context, -1) == 0);
+        get(*context, server.url("/slow"));
+        std::thread([&] {
+            fminus_web_http_within_begin(context->handle(), 100);
+            get(*context, server.url("/slow"));
+        }).join();
+        const auto start = std::chrono::steady_clock::now();
+        context.reset();
+        CHECK(since(start) < 2s);
+        CHECK_FALSE(fminus::web::ioThreadRunning());
+    }
+}
+
+TEST_CASE("a scope's end racing the program closing its requests, and their completion", "[web][http][within]")
+{
+    Server server;
+    auto context = makeContext(loopback());
+    std::mt19937 random(12345);
+    for (int round = 0; round < 20; ++round)
+    {
+        REQUIRE(within(*context, static_cast<std::int32_t>(random() % 40)) == 0);
+        std::vector<void*> requests;
+        for (int i = 0; i < 6; ++i)
+            requests.push_back(get(*context, server.url(i % 2 == 0 ? "/slow" : "/after/" + std::to_string(random() % 40))));
+        const unsigned pause = random() % 40;
+        std::thread closer([&, pause] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(pause));
+            fminus_web_http_close(requests[0]);
+            fminus_web_http_close(requests[1]);
+        });
+        endWithin(*context);
+        closer.join();
+        for (std::size_t i = 2; i < requests.size(); ++i)
+        {
+            const std::int32_t status = fminus_web_http_status(requests[i]);
+            CHECK((status == 200 || status == FMINUS_WEB_TIMEOUT));
+            fminus_web_http_close(requests[i]);
+        }
+    }
 }
 
 TEST_CASE("the audio thread's reads are wait-free: a poll loop sees the status arrive", "[web][http]")
@@ -1589,6 +1947,7 @@ TEST_CASE("HTTPS against the loopback server, with the test's own certificate au
 
 namespace
 {
+#if FMINUS_HAS_JSON
     // A program that fetches pack <k> from the loopback server at <port>, parses it and reads its numbers: the gain
     // times 1000, plus the table's sum, plus the index times 100; or the status, when it is no 200.
     const char* const kFetch = "float fetch(int port, int k)\n"
@@ -1612,6 +1971,7 @@ namespace
                                "    json_free(doc);\n"
                                "    return result;\n"
                                "}\n";
+#endif
 
     std::unique_ptr<fminus::Program> compileProgram(const std::string& source, const fminus::Program::Options& options)
     {
@@ -1766,17 +2126,16 @@ TEST_CASE("a Program destroyed with requests in flight, and stopped with a threa
         REQUIRE(wait(done) == 200);
         void* slow = start(server.port());
         std::atomic<int> result{1};
-        std::atomic<bool> waiting{false};
-        std::thread loader(
-            [&]
-            {
-                waiting = true;
-                result = wait(slow);
-            });
-        REQUIRE(eventually([&] { return waiting.load() && server.hits("/slow") == before + 5; }));
-        std::this_thread::sleep_for(10ms);   // into the wait
+        std::thread loader([&] { result = wait(slow); });
+        // In the wait, counted by the program's context (its module's global holds its handle): a stop before it
+        // would cancel the request all the same, but not by waking the loader.
+        const std::uintptr_t global = program->address("fminus_web_context", errors);
+        void* handle = global == 0 ? nullptr : *reinterpret_cast<void* const*>(global);
+        const bool inside = eventually(
+            [&] { return server.hits("/slow") == before + 5 && fminus::web::waitingThreads(handle) == 1; });
         program->stopWeb();
         loader.join();
+        REQUIRE(inside);
         CHECK(result.load() == FMINUS_WEB_CANCELLED);
         CHECK(body(done) == 5 + 1);                          // "hello", still there
         CHECK(wait(again(server.port())) == FMINUS_WEB_CANCELLED);   // stopped for good

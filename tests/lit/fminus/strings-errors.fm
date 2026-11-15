@@ -32,7 +32,7 @@ int wait() [[clang::nonblocking]] { return __fminus_string_hash_blocking("x"); }
 // CHECK: strings-errors.fm:14:67: error: argument to '__fminus_string_hash' must be a string literal
 // CHECK: strings-errors.fm:21:11: error: initializing 'float' with an expression of incompatible type 'char[3]'
 // CHECK: strings-errors.fm:22:17: error: passing 'char[2]' to parameter of incompatible type 'float'
-// CHECK: strings-errors.fm:22:24: error: FMinus has no strings: a string literal is only the argument of a builtin's string parameter
+// CHECK: strings-errors.fm:22:24: error: FMinus has no char arrays here: a string literal is a 'string' where one is wanted, or the argument of a builtin's string parameter
 // CHECK: strings-errors.fm:25:44: error: function with 'nonblocking' attribute must not call non-'nonblocking' function '__fminus_string_hash_blocking'
 
 // PROGRAM: <stdin>:1:9: error: '__FMINUS_JSON__' cannot be used as a macro name: FMinus defines it in a build with the JSON parser (FMINUS_JSON)

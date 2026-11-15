@@ -119,7 +119,7 @@ namespace
 
     // Which of a choice table's literals (`words` lengths, then their bytes one after another) the `length` bytes at
     // `text` are: the index of the first, or -1 for none, or for a table that is not well formed.
-    std::int32_t choose(const void* choices, const char* text, std::size_t length)
+    [[maybe_unused]] std::int32_t choose(const void* choices, const char* text, std::size_t length)
     {
         Table table;
         if (!open(choices, table))

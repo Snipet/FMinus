@@ -1,5 +1,6 @@
 // In a build without the JSON parser (FMINUS_JSON=OFF), a json_ builtin is still a name FMinus knows: its call is an
-// error that names the option, not a call of an undeclared function, and __FMINUS_JSON__ is not defined.
+// error that names the option, not a call of an undeclared function, and __FMINUS_JSON__ is not defined. A field's
+// json:: attributes and its fminus::default are the language's, and no error there.
 // UNSUPPORTED: json
 // RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
 
@@ -15,6 +16,12 @@ float load(const void* data, int bytes)
     return x;
 }
 
-// CHECK: json-off.fm:12:17: error: 'json_parse' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
-// CHECK: json-off.fm:13:21: error: 'json_float' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
-// CHECK: json-off.fm:14:5: error: 'json_free' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+module Preset { float gain [[json::name("Gain")]] [[fminus::default(1)]]; };
+bool fill(void* doc, Preset* p) { return json_read(doc, "", p); }
+string name(json_doc doc, int k) { return json_string(doc, "/names/%d", k, "none"); }
+
+// CHECK: json-off.fm:13:17: error: 'json_parse' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-off.fm:14:21: error: 'json_float' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-off.fm:15:5: error: 'json_free' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-off.fm:20:42: error: 'json_read' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)
+// CHECK: json-off.fm:21:43: error: 'json_string' needs the JSON parser, which this build of FMinus leaves out (FMINUS_JSON=OFF)

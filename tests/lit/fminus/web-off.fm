@@ -20,6 +20,16 @@ int load(const void* data)
     return s + HTTP_REFUSED;
 }
 
+// A URL with holes: the same error, once a call.
+http_response fetch(string name, int k, const void* data)
+{
+    http_post("https://example.com/presets/{name}", data, 4, "application/json");
+    return http_get("https://example.com/presets/{name}/{k}.json");
+}
+
+// A POST of a JSON literal: the web library's error, once, whatever the JSON writer.
+http_response sent(int n) { return http_post("https://example.com/n", json { "n": n }); }
+
 // CHECK: web-off.fm:14:15: error: 'http_get' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
 // CHECK: web-off.fm:15:15: error: 'http_post' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
 // CHECK: web-off.fm:16:13: error: 'http_wait' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
@@ -30,5 +40,8 @@ int load(const void* data)
 // CHECK: web-off.fm:18:5: error: 'http_cancel' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
 // CHECK: web-off.fm:19:5: error: 'http_close' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
 // CHECK: web-off.fm:20:16: error: 'HTTP_REFUSED' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:26:5: error: 'http_post' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:27:12: error: 'http_get' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
+// CHECK: web-off.fm:31:36: error: 'http_post' needs the web library, which this build of FMinus leaves out (FMINUS_WEB=OFF)
 
 // ALLOW: fminus: --web-allow: this build of FMinus leaves out the web library (FMINUS_WEB=OFF)

@@ -1,0 +1,44 @@
+// json_read's errors and the json:: attributes', one each, from the command line: a module with no field json_read
+// fills, at the call; a pointer to anything but a module, a const module, a module itself, at the argument (the const
+// one at the call, as every passing error); the path's, as every read's; json::name without one string, empty, or not
+// UTF-8, json::skip with an argument, a json:: name FMinus does not have; two fields under one JSON name, at the second
+// with a note at the first; and a field's fminus::default on what holds no number, an int's that is no integer, a
+// bool's that is neither 0 nor 1, one outside the field's range.
+// REQUIRES: json
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+
+module Notes { string text; param float level; float* p; int count [[json::skip]]; };
+module Fine { float a; };
+
+bool nothing(json_doc d, Notes* n) { return json_read(d, "", n); }
+bool numbers(json_doc d, float* x) { return json_read(d, "", x); }
+bool constant(json_doc d, const Fine* f) { return json_read(d, "/f", f); }
+bool value(json_doc d) { Fine f; return json_read(d, "/%d", f); }
+
+module Attributes
+{
+    float a [[json::name]] [[json::name("")]] [[json::name("\xC0\x80")]];
+    float b [[json::skip(0)]] [[json::other]];
+    float c [[json::name("a")]];
+    string s [[fminus::default(0)]];
+    int i [[fminus::default(0.5)]];
+    bool o [[fminus::default(-1)]];
+    float r [[fminus::range(0, 1)]] [[fminus::default(2)]];
+};
+
+// CHECK: json-read-errors.fm:13:45: error: 'json_read' has nothing to fill in 'Notes': it fills no parameter, string, pointer, handle, poly type or field with {{\[\[json::skip\]\]}}, and 'Notes' has no other field
+// CHECK: json-read-errors.fm:14:62: error: 'json_read' fills a module: its last argument must be a pointer to one, not 'float *'
+// CHECK: json-read-errors.fm:15:51: error: passing 'const Fine *' to parameter of type 'Fine *' discards qualifiers
+// CHECK: json-read-errors.fm:16:57: error: more '%' conversions than data arguments
+// CHECK: json-read-errors.fm:16:61: error: 'json_read' fills a module: its last argument must be a pointer to one, not 'Fine'
+// CHECK: json-read-errors.fm:20:15: error: 'json::name' attribute takes one argument
+// CHECK: json-read-errors.fm:20:30: error: 'json::name' takes a name of one byte or more: the JSON member's the field is read and written as
+// CHECK: json-read-errors.fm:20:49: error: 'json::name' takes UTF-8 text, as a JSON member's name is, and byte 1 of the name is no part of any
+// CHECK: json-read-errors.fm:21:15: error: 'json::skip' attribute takes no arguments
+// CHECK: json-read-errors.fm:21:33: error: unknown attribute 'json::other': a field takes json::name("name") and json::skip
+// CHECK: json-read-errors.fm:22:15: error: duplicate JSON name 'a' in module 'Attributes'
+// CHECK: json-read-errors.fm:20:11: note: previous field of that JSON name is here
+// CHECK: json-read-errors.fm:23:16: error: 'fminus::default' does not apply to a string field: json_read leaves a string field out, so its default would never be used
+// CHECK: json-read-errors.fm:24:13: error: the default of an int field is an int, not 0.5
+// CHECK: json-read-errors.fm:25:14: error: the default of a bool field is 0 or 1, not -1
+// CHECK: json-read-errors.fm:26:11: error: the default of 'r', 2, is outside its fminus::range(0, 1)

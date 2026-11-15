@@ -1,0 +1,78 @@
+// examples/trigger/trigger.fm: an envelope that a gate triggers, its note-on found by `when` (README.md, the language;
+// docs/extending.md, recipe 47). A gate is high for as long as a key is held, many samples; the note starts once, on
+// the sample the gate rises. `when (gate[i] > 0.5f)` runs its statement on that sample only: its state, whether the
+// gate was high the last time it looked, is a bool of the module's instance, so an edge is found across the host's
+// blocks as within one, with no flag for the program to keep, and no call that waits.
+//
+//     fminus examples/trigger/trigger.fm --run notes 10       10: one note a beat
+//     fminus examples/trigger/trigger.fm --run held 10        9000: the samples the gate is high, where an if fires
+module Envelope
+{
+    float level;
+    float decay;
+    int notes;
+
+    void init(float seconds, float rate)
+    {
+        decay = expf(-1.0f / (seconds * rate));
+    }
+
+    void process(const float* gate, float* out, int n) [[clang::nonblocking]]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            when (gate[i] > 0.5f)   // the rising edge: the note starts, once
+            {
+                level = 1.0f;
+                notes++;
+            }
+            out[i] = level;
+            level *= decay;
+        }
+    }
+};
+
+enum
+{
+    BLOCK = 480,   // the host's block: 10 ms at 48 kHz
+    BEAT = 1200,   // a beat of 25 ms, the key held for the first 900 samples of it
+    HELD = 900,
+};
+
+// The gate for the block that starts at sample `start`.
+void gate(float* out, int start)
+{
+    for (int i = 0; i < BLOCK; ++i)
+        out[i] = (start + i) % BEAT < HELD ? 1.0f : 0.0f;
+}
+
+// `beats` beats of the gate, a block at a time: the notes the envelope heard, one a beat, though its edges fall
+// anywhere in a block.
+int notes(int beats)
+{
+    Envelope e;
+    e.init(0.1f, 48000.0f);
+    float in[BLOCK];
+    float out[BLOCK];
+    for (int start = 0; start < beats * BEAT; start += BLOCK)
+    {
+        gate(in, start);
+        e.process(in, out, BLOCK);
+    }
+    return e.notes;
+}
+
+// The same with an if, which runs on every sample the gate is high: what `when` saves a program from counting.
+int held(int beats)
+{
+    float in[BLOCK];
+    int count = 0;
+    for (int start = 0; start < beats * BEAT; start += BLOCK)
+    {
+        gate(in, start);
+        for (int i = 0; i < BLOCK; ++i)
+            if (in[i] > 0.5f)
+                count++;
+    }
+    return count;
+}
