@@ -257,8 +257,10 @@ TEST_CASE("json_write's floats are the shortest digits that the runtime's parser
             char fewer[64];
             const auto f = std::to_chars(fewer, fewer + sizeof fewer, value, std::chars_format::scientific,
                                          static_cast<int>(significant) - 2);
-            float near = 0;
-            std::from_chars(fewer, f.ptr, near);
+            // Read back by the runtime's parser, as above: std::from_chars of a float is not in macOS's C++ library
+            // before macOS 26, and FMinus builds for macOS 14.
+            const Document shorter("[" + std::string(fewer, f.ptr) + "]");
+            const float near = fminus_rt_json_float(shorter.doc, path.data(), nullptr, 0, std::nanf(""));
             CHECK(near != value);
         }
         ++checked;
