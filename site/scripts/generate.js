@@ -3,7 +3,7 @@
 //   api.json         include/fminus/FMinus.h: every public declaration, its comment and its signature
 //   grammar.json     src/frontend/Parser.y and Lexer.l: rules, railroad diagrams, tokens, precedence, the scanner
 //   internals.json   the documents' list and docs/README.md; docs/<slug>.json, one document each
-//   home.json        the README's opening paragraph, and a line on each section
+//   home.json        the README's opening paragraph, and the API's, the grammar's and the documents' summaries
 //   search.json      every heading and declaration, for the search box
 //   highlight.css    the colours of the highlighted code, light and dark
 // A source the generators can't read, or a public declaration with no comment, stops the build with the file, the line

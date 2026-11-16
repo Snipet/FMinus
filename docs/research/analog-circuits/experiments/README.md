@@ -26,10 +26,10 @@ fmbench bench_ts.fm vector 1000000 7 $(cat bench_ts.names)    # the report's cyc
   and `tone2.cpp` includes `tone_lib.cpp`. On one core, `./adaa worst` took about 3 minutes and `./selftest` 37 to 81
   seconds.
 - **FMinus programs.** `fminus` is FMinus's driver, `build-dev/bin/fminus` after `cmake --workflow --preset dev`
-  ([README](../../../../README.md#quick-start)): `fminus prog.fm` compiles and prints the optimised IR, and
+  ([README](../../../../README.md#getting-started)): `fminus prog.fm` compiles and prints the optimised IR, and
   `fminus prog.fm --run f x` calls `f(x)`.
 - **`fmbench`** ([`fmbench.cpp`](fmbench.cpp)) is a host of FMinus's C++ API: build it as any host is built, linking
-  `FMinus::FMinus` ([README](../../../../README.md#using-fminus-as-a-library)), at `c75caab` for the report's
+  `FMinus::FMinus` ([library.md](../../../library.md)), at `c75caab` for the report's
   numbers. It runs on macOS only (`proc_pid_rusage`, QoS classes). `fmbench file.fm vector|fast|libm n reps fn...`
   compiles the file in that math mode with subnormals flushed and one thread, then calls each `float fn(float n)` `reps`
   times and prints the best wall time, cycles and instructions per unit of `n`.

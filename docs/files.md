@@ -135,7 +135,7 @@ them.
   handle's fields never change once it is returned, so the reads are plain loads, and a table may be read straight
   from `file_data` on the audio thread for as long as the handle is open ([the audio thread](#the-audio-thread)).
 - **Bytes, not text.** `bytes_floats` and `bytes_pcm16` turn a file's bytes into numbers, and `json_parse` and
-  `xml_parse` parse them ([README](../README.md), the builtins), and `string_of(file_data(f), file_size(f))` views them
+  `xml_parse` parse them ([language.md](language.md), the builtins), and `string_of(file_data(f), file_size(f))` views them
   as text, a `string` valid until `file_close`.
 - **A listing gives its files' names**, `file_name(list, i)`, each the entry's own as the listing holds it (only a name
   a program could have written: [listings](#listings)), valid until the listing is closed. What a name is then good

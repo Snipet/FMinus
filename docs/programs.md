@@ -255,9 +255,9 @@ run:
 
 Then `aot::emitExecutable` writes the object to a temporary file and links it with the compiler driver the build tree
 was configured with, against `libfminus_runtime.a` (and, in the `asan` and `tsan` presets, the sanitizer runtimes).
-That is the same path `fminus-build` takes for hand-written IR; README.md's "Executables" has the details.
+That is the same path `fminus-build` takes for hand-written IR; "Executables, in detail" (below) has the details.
 
-In the `-O2` listing, `expf` is the default math mode's (README.md's "The language (v0)" has the modes): FMinus's own
+In the `-O2` listing, `expf` is the default math mode's ([language.md](language.md) has the modes): FMinus's own
 kernel, inline, `%exp` to `%exp26`, 27 instructions of fused multiply-adds, IEEE arithmetic and bit operations. At `-O0`
 it is a call of the runtime's `fminus_rt_expf`, which computes the same. The runtime keeps that name for itself, with
 `fminus_rt_exp_f4` and `fminus_rt_libm_expf`, as it keeps three for each of `sinf`, `cosf`, `tanf`, `logf` and `tanhf`:
@@ -306,6 +306,49 @@ inlined into `main` and there is nothing to break on but `main` itself. Source-l
 - `tests/unit/AotTest.cpp` checks the IR `addEntryPoint` leaves (an internal `fminus.main`, an external
   `i32 main(i32, ptr)`, the two runtime declarations) and what it refuses: no `main`, a prototype only, an `i1`
   result, a vector parameter, a variadic `main`.
+
+## Executables, in detail
+
+For development, a module can also be compiled ahead of time for this machine, into a native executable you can run
+under lldb or Instruments, or into an object or assembly file to read. Its machine code is what LLJIT generates for the
+same module, since both use the TargetMachine and pipeline in `support/HostTarget.h`.
+
+An FMinus program with a `float main(...)` builds straight into one (or a `double` or `bool` one, whose parameters are
+floats and doubles). `fminus::aot::addEntryPoint` renames the program's `main` to `fminus.main` and adds the C `main` an
+executable starts in, which reads the arguments as their types say and prints the result
+([programs.md](programs.md)):
+
+```bash
+build-dev/bin/fminus note.fm --emit exe -o note             # then ./note 69
+build-dev/bin/fminus note.fm --entry                        # the IR with that C main (--emit asm, obj too)
+build-dev/bin/fminus osc.fm --emit exe --loop-budget 1000000 -o osc   # main stops past the budget, and exits with 3
+build-dev/bin/fminus taps.fm --emit exe --bounds-check -o taps         # main stops at a failed check, exits with 4
+```
+
+`fminus-build` builds LLVM IR written by hand, which brings its own C `main`:
+
+```bash
+build-dev/bin/fminus-build kernel.ll -o kernel              # an executable (the IR needs a main)
+build-dev/bin/fminus-build kernel.ll --emit asm -o -        # this machine's assembly, after -O3
+build-dev/bin/fminus-build kernel.ll --emit ll -O2 -o -     # the optimised IR; --emit obj for an object file
+build-dev/bin/fminus-build kernel.ll -o kernel --link-arg=-framework --link-arg=Accelerate
+```
+
+From code, it is `fminus::aot::emitFile`, `linkExecutable`, `emitExecutable` and `addEntryPoint` in `src/support/Aot.h`.
+Linking goes through the C++ compiler driver this build tree was configured with (Xcode's clang; `$FMINUS_LINK_DRIVER`
+overrides it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs; on Windows, clang-cl, which
+names an executable `note.exe` when asked for `note`. It links this tree's `libfminus_runtime.a`, so JIT'd and
+ahead-of-time code call the same runtime. An executable whose program calls the web library links `libfminus_web.a`,
+libcurl, Mbed TLS and the system libraries they need too (and one that does not, none of them), and reads the URLs it
+may reach from `FMINUS_WEB_ALLOW` when it starts: none by default ([web.md](web.md)); one that calls
+`http_listen` reads where it may listen from `FMINUS_WEB_LISTEN` (and with it `FMINUS_WEB_TOKEN`, `FMINUS_WEB_HOSTS`,
+`FMINUS_WEB_ROOT`, a directory of static files, and `FMINUS_WEB_OPEN`): nowhere by default. One whose program names a
+file reads its folders from `FMINUS_FILES_READ` and `FMINUS_FILES_WRITE` (and with them `FMINUS_FILES_DENY`,
+`FMINUS_FILES_TYPES` and `FMINUS_FILES_ANYWHERE`) when it starts: none by default ([files.md](files.md)). In
+the JIT,
+`fminus::defineRuntimeSymbols` defines every function listed in `src/runtime/RuntimeSymbols.def` by its address (and,
+with the web library, `src/web/WebSymbols.def`'s). Under the `asan` and `tsan` presets, the sanitizer runtimes are linked
+too. This is a development feature: inside a plugin, FMinus only ever JITs.
 
 ## Where to go next
 

@@ -2,7 +2,7 @@
 
 `import fminus` is FMinus as a Python package: it compiles FMinus programs while Python runs, for the machine it runs
 on, and calls their functions with Python's numbers and buffers. It is the C++ library's public API
-(`include/fminus/FMinus.h`, [README.md](../README.md#using-fminus-as-a-library)) as Python objects, and no more: a
+(`include/fminus/FMinus.h`, [library.md](library.md)) as Python objects, and no more: a
 host like any other, written against `FMinus::FMinus` alone.
 
 ```python
@@ -141,7 +141,7 @@ float`, or returns a pointer.
 [('in', 'const float *'), ('out', 'float *'), ('n', 'int'), ('g', 'float')]
 ```
 
-Every call goes through `Program::call()` (README.md, "Calls by name"), which checks each argument against the
+Every call goes through `Program::call()` ([library.md](library.md), "Calls by name"), which checks each argument against the
 declaration, so a wrong call is a `TypeError` with FMinus's message, never undefined behaviour. Arguments are
 positional. What crosses:
 
@@ -234,7 +234,7 @@ none), and its `attributes`, each a record of a `name` (`"ui::unit"`) and its `a
 
 ## The safety options
 
-Both are the library's (README.md, "Loop budget" and "Bounds checks"); from Python, a call they stop raises.
+Both are the library's ([library.md](library.md), "Loop budget" and "Bounds checks"); from Python, a call they stop raises.
 
 **`loop_budget=True`** counts the program's loops against a budget, and a call that runs out returns early and raises
 `fminus.LoopBudgetError`. Set the budget before each call it limits: what is left carries over.
@@ -380,7 +380,7 @@ it to `pypi`.
   source distribution there, LLVM and all.
 - **Its dependencies' licence texts in a wheel.** A wheel holds LLVM, PFFFT, yyjson and pugixml, linked in, and was
   compiled with pybind11's headers, and carries FMinus's `LICENSE` alone. Their licences ask a binary for their
-  notices (README.md, "License"): add the five texts to the package (`license-files` in `pyproject.toml`) before the
+  notices ([licenses.md](licenses.md)): add the five texts to the package (`license-files` in `pyproject.toml`) before the
   first upload.
 - **Runs elsewhere.** The Wheels workflow has built and tested the package on GitHub for one CPython, 3.12, on Linux
   (x86-64), macOS (arm64) and Windows (x64): each wheel passed `python/tests/`, NumPy's included. The other CPythons,

@@ -21,7 +21,7 @@
 #   pybind11      cmake/FMinusPython.cmake       the Python package only (FMINUS_BUILD_PYTHON)
 # Built dependencies are kept in the deps cache (FMINUS_DEPS_DIR, default .deps/), shared by every build tree.
 #
-# Layout (README.md): src/ is the fminus library: every .cpp under it is a source, and each Bison grammar there,
+# Layout (docs/architecture.md): src/ is the fminus library: every .cpp under it is a source, and each Bison grammar there,
 # with the Flex scanners beside it, is generated into the library. include/fminus/ is its public API. tools/<name>/
 # holds one executable each, examples/<name>/ one example each (a program and its harness). tests/ holds unit/
 # (Catch2), smoke/ (the toolchain's own checks) and lit/ (lit and FileCheck). Adding a file edits no CMake.

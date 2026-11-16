@@ -11,6 +11,12 @@ for lit. Nothing else needs to be installed: LLVM, Bison, Flex, PFFFT, CLI11 and
 the build itself (and JUCE by the plugin example's, [below](#the-plugin-example)). The first configure needs the
 network.
 
+On Linux: clang (FMinus's runtime uses clang's vector types and builtins, which GCC does not have), CMake 3.30 or
+later, Ninja, Python 3, and make and m4 for building Bison and Flex; configure with `CC=clang CXX=clang++` (or
+`-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++`) where clang is not the system's default compiler. Built and
+tested on x86-64 with Ubuntu 24.04's clang 18, through the `release` and `dev` presets, with the web library and
+without; arm64 has not been built.
+
 On Windows: Visual Studio 2022 or later (or its Build Tools) with the "Desktop development with C++" workload and
 its "C++ Clang tools for Windows" (clang-cl; "C++ Clang Compiler for Windows" under Individual components), CMake 3.30
 or later, Ninja, Python 3, and Git for Windows (lit's tests use its `echo` and `sed`). A developer prompt for x64
@@ -120,6 +126,29 @@ type that is not 1 to 16 ASCII letters and digits (without the dot), and a byte 
 `FMINUS_FILES_MAX_BYTES`. A host's policy can narrow every one of these, and raise none ([files.md](files.md), "Building
 it").
 
+## Dependencies
+
+Everything comes through CMake's FetchContent, pinned by hash in `cmake/FMinusPins.cmake` (JUCE by its git commit).
+Nothing is taken from the system unless an option asks for it.
+
+| Dependency | Version | How | Cached in |
+|---|---|---|---|
+| LLVM (llvm/ only) | 23.1.3 | source release, built and installed once per flavor | `.deps/install/llvm-<ver>-<flavor>` |
+| GNU Bison | 3.8.2 | source tarball, `./configure && make` at configure time | `.deps/install/bison-3.8.2` |
+| Flex | 2.6.4 | source tarball, `./configure && make` at configure time | `.deps/install/flex-2.6.4` |
+| WinFlexBison (Windows, in place of the two above) | 2.5.25 and fixes: Bison 3.8.2, Flex 2.6.4 | source archive of a commit, built with CMake at configure time | `.deps/install/winflexbison-2.5.25-a243a1c` |
+| PFFFT | marton78's fork, commit aa16fd3 (2026-09-29) | source archive of a commit; two C files compiled into `libfminus_runtime.a` | `.deps/src/pffft-<commit>` |
+| fast_float (`FMINUS_JSON` or `FMINUS_XML`, both on by default, or `FMINUS_WEB_SERVER`) | 8.3.3 (2026-10-31) | source archive of the release's tag; headers, compiled into `libfminus_runtime.a` (and `libfminus_web.a`, for the server's query numbers) | `.deps/src/fast_float-<version>` |
+| yyjson (`FMINUS_JSON`, on by default) | 0.13.0 (2026-09-08) | source archive of the release's tag; its reader, one C file, compiled into `libfminus_runtime.a` | `.deps/src/yyjson-<version>` |
+| pugixml (`FMINUS_XML`, on by default) | 1.16 (2026-06-16) | source archive of the release's tag; one C++ file, without XPath, exceptions or the STL, compiled into `libfminus_runtime.a` | `.deps/src/pugixml-<version>` |
+| libcurl (`FMINUS_WEB`, off by default) | 8.23.0 (2026-10-14) | the release's tarball from curl.se; built with its own CMake at configure time, static, HTTP and HTTPS only, into `libfminus_web.a`'s dependencies | `.deps/install/curl-<version>-<flavor>` |
+| Mbed TLS (`FMINUS_WEB`, macOS and Linux) | 4.1.1, the 4.1 LTS branch | the release's tarball (a GitHub release asset); built with its own CMake at configure time, static, threading on | `.deps/install/mbedtls-<version>-<flavor>` |
+| llhttp (`FMINUS_WEB_SERVER`, off by default) | 9.4.3 (2026-07-30) | source archive of the release's tag, `release/v9.4.3` (it holds the generated C); three C files compiled into `libfminus_web.a`, hidden, every lenient flag off | `.deps/src/llhttp-<version>` |
+| CLI11 | 2.7.2 | release source package, header-only, inside each build tree | the build tree |
+| Catch2 | 3.16.1 | source archive, built inside each build tree | the build tree |
+| pybind11 (the Python package only, `FMINUS_BUILD_PYTHON`) | 3.1.0 | PyPI's source distribution, header-only, inside each build tree | the build tree |
+| JUCE (`examples/plugin/` only) | 8.0.4, commit 51d11a2 | git clone of the pinned commit, by the plugin's own build | the plugin's build tree |
+
 ## The dependency cache
 
 Everything built from a dependency lives in `.deps/` (or wherever `FMINUS_DEPS_DIR` points, as a CMake or
@@ -202,6 +231,22 @@ Bison runs with `-Wall -Wcounterexamples` (`FMINUS_BISON_FLAGS`). Its report, `P
 except one: Bison's own C++ skeleton sets a counter it never reads (`yynerrs_`), so `-Wunused-but-set-variable` is
 off for generated parsers.
 
+### A grammar of your own
+
+`fminus_add_grammar(<target> PARSER x.y LEXERS x.l ...)` runs Bison and Flex at build time and adds the outputs to the
+target. Under `src/` this happens on its own: every directory holding a `.y` is a grammar, with the `.l` files beside
+it. Outputs keep their path relative to `src/`:
+
+| Source | Generated | Include as |
+|---|---|---|
+| `src/frontend/Parser.y` | `Parser.tab.cpp`, `Parser.tab.hpp`, `location.hh`, `Parser.output` (Bison's report) | `"frontend/Parser.tab.hpp"` |
+| `src/frontend/Lexer.l` | `Lexer.yy.cpp`, `Lexer.yy.hpp` (the scanner's API) | `"frontend/Lexer.yy.hpp"` |
+
+Bison runs with `-Wall -Wcounterexamples` (`FMINUS_BISON_FLAGS`), so a conflict comes with an example input.
+`tests/smoke/calc/` is a working pattern to copy. It has a Bison C++ parser with variants, token constructors,
+locations and detailed errors, and a reentrant, prefixed Flex scanner reading from memory. `CalcScanner.h` is the glue
+between the two: `YY_DECL`, the scanner's state and the `yylex` the parser calls.
+
 ## Adding things
 
 Every source list is a glob, so adding a file never edits CMake. Configure picks a new file up on the next build
@@ -269,7 +314,7 @@ clones it, and git names a commit by the hash of its contents ([below](#the-plug
    includes, `src/runtime/Numbers.cpp`, which hides its symbols. A dependency of an option is fetched only when the
    option is on: the module returns before anything else when it is off.
 3. **Include the module** from `CMakeLists.txt`, under the option that needs it, and link its target where it's used.
-4. **Note it** in README.md's dependency table and its License section.
+4. **Note it** in the dependency table ([above](#dependencies)) and in [licenses.md](licenses.md).
 
 ## The plugin example
 

@@ -261,7 +261,7 @@ namespace fminus::ir::detail
                                          + problem);
     }
 
-    // A prototype without a definition calls the process's C function of its name (README.md): libm's, when its name
+    // A prototype without a definition calls the process's C function of its name (docs/language.md): libm's, when its name
     // and its type are a math function's that TargetLibraryInfo knows (asinf, powf, atan2f, ldexpf, ...). LLVM's own
     // attributes for those (InferFunctionAttrs, which the pipeline runs) say that each may write errno and nothing else
     // but its pointers' memory; and a call that writes memory is never hoisted out of a loop, removed, or vectorised.

@@ -536,7 +536,7 @@ A first configure with it on fetches **llhttp 9.4.3**, Node.js's HTTP parser, in
 bytes), and compiles its three generated C files into `fminus_web`, with their own flags and hidden symbols, never its
 own CMake; and **fast_float**, for a query's numbers, if neither parser has fetched it already (`FMINUS_JSON` and
 `FMINUS_XML` are on by default, and do). Nothing else: the server's sockets and every check are FMinus's own. llhttp is
-MIT-licensed; a binary that includes the server carries its notice (the README's "License").
+MIT-licensed; a binary that includes the server carries its notice ([licenses.md](licenses.md)).
 
 With the option off, nothing more is fetched or built, the server's sources under `src/web/` compile to nothing,
 `fminus/Config.h` says `#define FMINUS_HAS_WEB_SERVER 0`, `__FMINUS_WEB_SERVER__` is not defined, each of the server's
@@ -724,7 +724,7 @@ literal is the error that says so ("a JSON literal needs the JSON writer, which 
   one), written as a JSON string, escaped as above, and UTF-8 text (a byte that is no part of any is an error). A
   duplicate key in one object is an error at the second. A value may also be a nested `{ }` or `[ ]`.
 - **A module's object** is its fields in their order, each under its own name or its `[[json::name("...")]]` (two
-  fields under one JSON name are an error), the names `json_read` reads them by ([README.md](../README.md), JSON): the same
+  fields under one JSON name are an error), the names `json_read` reads them by ([language.md](language.md), JSON): the same
   fields, under the same names, as `json_read`'s table. Left out: a field with `[[json::skip]]`, a pointer, a handle
   and a poly type (none has a JSON value), and a `when`'s hidden state. A `string` field **is** written (`json_read`
   leaves one out, since it would point into the document). A field that is a module or an array of them nests.
