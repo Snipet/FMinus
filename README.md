@@ -92,14 +92,14 @@ float main(float note)
 ```
 
 ```console
-$ fminus note.fm --emit exe -o note
+$ fminus note.fm -o note
 $ ./note 69
 440
 ```
 
 ## Getting started
 
-### Build it
+### Build and install
 
 You need CMake 3.30 or later, Ninja, Python 3 and clang: Xcode's command line tools on macOS (Apple silicon), clang
 on Linux, and Visual Studio 2022 with its "C++ Clang tools for Windows" on Windows
@@ -109,23 +109,32 @@ FMinus uses) is downloaded at pinned versions and built by the build itself.
 ```bash
 git clone https://github.com/Snipet/FMinus.git
 cd FMinus
-cmake --workflow --preset release      # configure, build and test
+cmake --workflow --preset release                  # configure, build and test
+cmake --install build-release --prefix ~/.local    # or `sudo cmake --install build-release`, into /usr/local
+export PATH="$HOME/.local/bin:$PATH"               # if ~/.local/bin is not on your PATH yet
+fminus --version
 ```
 
 The first configure builds LLVM once (10 to 30 minutes, with its output streaming) into a cache, `.deps/`, which every
-later build tree finds in seconds. The compiler is then `build-release/bin/fminus`.
+later build tree finds in seconds. The install is `bin/fminus`, with LLVM inside it, and the runtime it links into the
+executables it makes, beside it in `lib/fminus/`: the prefix can be moved anywhere.
+[building.md](docs/building.md#installing) covers Windows, prebuilt archives, what an install holds, and uninstalling.
 
 ### Use it
 
+`fminus` takes the options a C compiler does:
+
 ```bash
-fminus note.fm --run main 69           # compile in memory, call main(69), print the result: 440
-fminus note.fm --emit exe -o note      # an executable that runs main
-fminus note.fm                         # the optimised LLVM IR (-O0 for the IR as written)
-fminus note.fm --emit asm -o -         # this machine's assembly (--emit obj: an object file)
+fminus note.fm --run main 69           # compile in memory, call main(69) and print the result: 440
+fminus note.fm -o note                 # an executable that runs main
+fminus -c note.fm                      # an object file, note.o (-S: assembly, note.s)
+fminus note.fm                         # the optimised LLVM IR on stdout (-O0: the IR as written)
+fminus --version                       # the version, LLVM's, the target and the build's features
 ```
 
-[programs.md](docs/programs.md) starts from a first program, and [language.md](docs/language.md) is the language
-itself.
+Running a program in memory needs nothing but `fminus`; making an executable needs a C++ toolchain for its linker
+(clang or GCC on Linux, Xcode's command line tools on macOS, Visual Studio on Windows). [programs.md](docs/programs.md)
+starts from a first program, and [language.md](docs/language.md) is the language itself.
 
 ### Embed it
 
@@ -140,8 +149,9 @@ auto* twice = program->function<float(float)>("twice", errors);
 float y = twice(21.0f);                // 42, a plain call into the compiled code
 ```
 
-A CMake project links `FMinus::FMinus`; [library.md](docs/library.md) covers the API, and `examples/hello/` is a whole
-host. From Python, `import fminus` does the same ([python.md](docs/python.md)):
+A CMake project adds FMinus to its own build (`add_subdirectory` or FetchContent) and links `FMinus::FMinus`, as
+`examples/plugin/` does; [library.md](docs/library.md) covers the API, and `examples/hello/` is a whole host. From
+Python, `import fminus` does the same ([python.md](docs/python.md)):
 
 ```python
 import fminus
@@ -189,14 +199,15 @@ include/fminus/   the public C++ API: FMinus.h, Circuit.h
 src/              the compiler: frontend/ (Flex, Bison), ir/ (to LLVM IR), opt/, jit/, api/; and its libraries:
                   runtime/ (what compiled code calls), web/, circuit/
 tools/            fminus (the driver), fminus-build, fminus-hostinfo
+packaging/        what an install holds, and the archives CPack makes of it
 examples/         one example per directory: a program, and a harness that checks it
 python/           the Python package
-tests/            unit/ and library/ (Catch2), lit/ (lit and FileCheck), smoke/
+tests/            unit/ and library/ (Catch2), lit/ (lit and FileCheck), install/, smoke/
 docs/             the manual
 ```
 
 ## License
 
 FMinus is free software under the GNU General Public License, version 3 ([LICENSE](LICENSE)). Its dependencies keep
-their own licenses, and a binary that includes some of them, as an executable that links FMinus's runtime does, must
-carry their notices: [licenses.md](docs/licenses.md) says which.
+their own licenses, and a binary that includes some of them, as `fminus` and every executable it makes do, must carry
+their notices: [licenses.md](docs/licenses.md) says which, and an install carries them all in `share/doc/fminus/`.

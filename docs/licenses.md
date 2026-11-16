@@ -20,3 +20,12 @@ under the AGPLv3 or JUCE's commercial license; that example's README says what t
 Bison and Flex run only at build time; the code they generate is covered by Bison's skeleton exception and Flex's
 permissive license. On Windows they are WinFlexBison's ports, under the same licenses (its build scripts are
 GPL-3.0-or-later).
+
+## What an install carries
+
+An installed FMinus ([building.md](building.md), "Installing") is a distribution of these binaries: `bin/fminus` links
+LLVM and CLI11 in, besides the runtime's code, and `lib/fminus/`'s archives hold the code every executable `fminus`
+makes links. So an install carries every notice its files need, in `share/doc/fminus/`: `LICENSE`, FMinus's own;
+`NOTICES.txt`, which names each dependency the install holds, its license, and which installed file holds its code;
+and `third-party/<name>/`, each dependency's own license file. A distribution of an executable `fminus` made carries
+the notices `NOTICES.txt` lists for "every executable fminus makes".

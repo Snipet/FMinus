@@ -346,23 +346,24 @@ inlined into `main` and there is nothing to break on but `main` itself. Source-l
 
 ## Executables, in detail
 
-For development, a module can also be compiled ahead of time for this machine, into a native executable you can run
-under lldb or Instruments, or into an object or assembly file to read. Its machine code is what LLJIT generates for the
-same module, since both use the TargetMachine and pipeline in `support/HostTarget.h`.
+A module can also be compiled ahead of time for this machine, into a native executable to run as any program runs (and
+under lldb or Instruments), or into an object or assembly file to read or link. Its code comes from the same pipeline
+the JIT's does (`support/HostTarget.h`), and on Linux from the same code model and relocations, so an object is the
+JIT's code there; on macOS and Windows the object keeps the JIT's TargetMachine's settings.
 
 An FMinus program with a `float main(...)` builds straight into one (or a `double` or `bool` one, whose parameters are
 floats and doubles). `fminus::aot::addEntryPoint` renames the program's `main` to `fminus.main` and adds the C `main` an
-executable starts in, which reads the arguments as their types say and prints the result
-([programs.md](programs.md)):
+executable starts in, which reads the arguments as their types say and prints the result (above):
 
 ```bash
-build-dev/bin/fminus note.fm --emit exe -o note             # then ./note 69
-build-dev/bin/fminus note.fm --entry                        # the IR with that C main (--emit asm, obj too)
-build-dev/bin/fminus osc.fm --emit exe --loop-budget 1000000 -o osc   # main stops past the budget, and exits with 3
-build-dev/bin/fminus taps.fm --emit exe --bounds-check -o taps         # main stops at a failed check, exits with 4
+fminus note.fm -o note                                      # then ./note 69 (--emit exe says the same)
+fminus note.fm --entry                                      # the IR with that C main (-S and -c too)
+fminus osc.fm --loop-budget 1000000 -o osc                  # main stops past the budget, and exits with 3
+fminus taps.fm --bounds-check -o taps                       # main stops at a failed check, and exits with 4
 ```
 
-`fminus-build` builds LLVM IR written by hand, which brings its own C `main`:
+`fminus-build`, a development tool (a build tree's, and installed only with `--component devtools`), builds LLVM IR
+written by hand, which brings its own C `main`:
 
 ```bash
 build-dev/bin/fminus-build kernel.ll -o kernel              # an executable (the IR needs a main)
@@ -372,20 +373,22 @@ build-dev/bin/fminus-build kernel.ll -o kernel --link-arg=-framework --link-arg=
 ```
 
 From code, it is `fminus::aot::emitFile`, `linkExecutable`, `emitExecutable` and `addEntryPoint` in `src/support/Aot.h`.
-Linking goes through the C++ compiler driver this build tree was configured with (Xcode's clang; `$FMINUS_LINK_DRIVER`
-overrides it), which brings the SDK, libSystem and the ad-hoc signature arm64 needs; on Windows, clang-cl, which
-names an executable `note.exe` when asked for `note`. It links this tree's `libfminus_runtime.a`, so JIT'd and
-ahead-of-time code call the same runtime. An executable whose program calls the web library links `libfminus_web.a`,
-libcurl, Mbed TLS and the system libraries they need too (and one that does not, none of them), and reads the URLs it
-may reach from `FMINUS_WEB_ALLOW` when it starts: none by default ([web.md](web.md)); one that calls
-`http_listen` reads where it may listen from `FMINUS_WEB_LISTEN` (and with it `FMINUS_WEB_TOKEN`, `FMINUS_WEB_HOSTS`,
-`FMINUS_WEB_ROOT`, a directory of static files, and `FMINUS_WEB_OPEN`): nowhere by default. One whose program names a
-file reads its folders from `FMINUS_FILES_READ` and `FMINUS_FILES_WRITE` (and with them `FMINUS_FILES_DENY`,
-`FMINUS_FILES_TYPES` and `FMINUS_FILES_ANYWHERE`) when it starts: none by default ([files.md](files.md)). In
-the JIT,
-`fminus::defineRuntimeSymbols` defines every function listed in `src/runtime/RuntimeSymbols.def` by its address (and,
-with the web library, `src/web/WebSymbols.def`'s). Under the `asan` and `tsan` presets, the sanitizer runtimes are linked
-too. This is a development feature: inside a plugin, FMinus only ever JITs.
+Linking goes through a C++ compiler driver (`aot::findToolchain`: `$FMINUS_LINK_DRIVER`, else the compiler FMinus was
+built with if it is there, else `c++` or `clang++` on PATH), which brings the system's C and C++ libraries, and on macOS
+the SDK, libSystem and the ad-hoc signature arm64 needs; on Windows, clang-cl, which names an executable `note.exe` when
+asked for `note`. It links the runtime FMinus's own build made, `libfminus_runtime.a`: an installed `fminus`'s beside it
+(`../lib/fminus`), a build tree's from that tree, or `$FMINUS_RUNTIME_DIR`'s, as `fminus --print-runtime` says
+([building.md](building.md), "Installing"), so JIT'd and ahead-of-time code call the same runtime. An executable whose
+program calls the web library links `libfminus_web.a`, libcurl, Mbed TLS and the system libraries they need too (and one
+that does not, none of them), and reads the URLs it may reach from `FMINUS_WEB_ALLOW` when it starts: none by default
+([web.md](web.md)); one that calls `http_listen` reads where it may listen from `FMINUS_WEB_LISTEN` (and with it
+`FMINUS_WEB_TOKEN`, `FMINUS_WEB_HOSTS`, `FMINUS_WEB_ROOT`, a directory of static files, and `FMINUS_WEB_OPEN`): nowhere
+by default. One whose program names a file reads its folders from `FMINUS_FILES_READ` and `FMINUS_FILES_WRITE` (and with
+them `FMINUS_FILES_DENY`, `FMINUS_FILES_TYPES` and `FMINUS_FILES_ANYWHERE`) when it starts: none by default
+([files.md](files.md)). In the JIT, `fminus::defineRuntimeSymbols` defines every function listed in
+`src/runtime/RuntimeSymbols.def` by its address (and, with the web library, `src/web/WebSymbols.def`'s). Under the
+`asan` and `tsan` presets, the sanitizer runtimes are linked too. Inside a plugin, FMinus only ever JITs: an executable
+is for a program that runs on its own.
 
 ## Where to go next
 
