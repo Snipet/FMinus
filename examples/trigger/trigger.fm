@@ -1,4 +1,4 @@
-// examples/trigger/trigger.fm: an envelope that a gate triggers, its note-on found by `when` (README.md, the language;
+// examples/trigger/trigger.fm: an envelope that a gate triggers, its note-on found by `when` (docs/language.md;
 // docs/extending.md, recipe 47). A gate is high for as long as a key is held, many samples; the note starts once, on
 // the sample the gate rises. `when (gate[i] > 0.5f)` runs its statement on that sample only: its state, whether the
 // gate was high the last time it looked, is a bool of the module's instance, so an edge is found across the host's

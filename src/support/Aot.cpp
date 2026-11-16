@@ -1,5 +1,7 @@
 // src/support/Aot.cpp. The build gives it FMINUS_AOT_DRIVER (this tree's C++ compiler), FMINUS_RUNTIME_LIBRARY (the
-// path of libfminus_runtime.a) and FMINUS_AOT_SANITIZE (this tree's -fsanitize= list, or empty): src/CMakeLists.txt.
+// path of this tree's libfminus_runtime.a), FMINUS_RUNTIME_NAME (that file's name), FMINUS_INSTALL_RUNTIME_RELATIVE
+// (where an install puts the runtime's archives, from its bin/: ../lib/fminus) and FMINUS_AOT_SANITIZE (this tree's
+// -fsanitize= list, or empty): src/CMakeLists.txt; and in a build with the web library, generated/support/WebLink.inc.
 #include "support/Aot.h"
 
 #include "fminus/Config.h"   // FMINUS_HAS_WEB
@@ -17,6 +19,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/FileUtilities.h>
+#include <llvm/Support/Path.h>
 #include <llvm/Support/Program.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
@@ -24,7 +27,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <iterator>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace fminus::aot
@@ -64,39 +69,198 @@ namespace fminus::aot
         return llvm::Error::success();
     }
 
+    namespace
+    {
+        // The web library's archives, in link order: each one's path in this build tree (the tree's libfminus_web.a,
+        // the deps cache's libcurl and Mbed TLS) and its file's name in an install (src/CMakeLists.txt generates the
+        // list from FMinusWeb.cmake's); and then the system libraries they need, as the driver takes them.
+#if FMINUS_HAS_WEB
+        struct WebArchive
+        {
+            const char* built;
+            const char* installed;
+        };
+#define FMINUS_WEB_ARCHIVE(built, installed) {built, installed},
+#define FMINUS_WEB_SYSTEM(item)
+        constexpr WebArchive kWebArchives[] = {
+#include "support/WebLink.inc"
+        };
+#undef FMINUS_WEB_ARCHIVE
+#undef FMINUS_WEB_SYSTEM
+#define FMINUS_WEB_ARCHIVE(built, installed)
+#define FMINUS_WEB_SYSTEM(item) item,
+        constexpr const char* kWebSystem[] = {
+#include "support/WebLink.inc"
+        };
+#undef FMINUS_WEB_ARCHIVE
+#undef FMINUS_WEB_SYSTEM
+#endif
+
+        bool isFile(const std::string& path)
+        {
+            return llvm::sys::fs::is_regular_file(path);
+        }
+
+        std::string joined(llvm::StringRef directory, llvm::StringRef name)
+        {
+            llvm::SmallString<256> path(directory);
+            llvm::sys::path::append(path, name);
+            return std::string(path);
+        }
+
+        // The installed layout's directory of archives: FMINUS_INSTALL_RUNTIME_RELATIVE (../lib/fminus) from the
+        // running executable's directory, as the system names it (on Linux and macOS its real path, so that a link to
+        // an installed fminus finds the install); empty when the system cannot say where the executable is.
+        std::string besideExecutable()
+        {
+            const std::string executable = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+            if (executable.empty())
+                return {};
+            llvm::SmallString<256> directory(llvm::sys::path::parent_path(executable));
+            llvm::sys::path::append(directory, FMINUS_INSTALL_RUNTIME_RELATIVE);
+            llvm::sys::path::remove_dots(directory, true);
+            llvm::sys::path::native(directory);
+            return std::string(directory);
+        }
+
+        const char* environment(const char* name)
+        {
+            const char* value = std::getenv(name);
+            return value != nullptr && *value != '\0' ? value : nullptr;
+        }
+
+        // The runtime's archives in `directory`, laid out as an install lays them out.
+        void fromDirectory(Toolchain& found, const std::string& directory, std::string from)
+        {
+            const std::string runtime = joined(directory, FMINUS_RUNTIME_NAME);
+            found.runtimeTried.push_back(runtime);
+            if (!isFile(runtime))
+                return;
+            found.runtime = runtime;
+            found.runtimeFrom = std::move(from);
+#if FMINUS_HAS_WEB
+            for (const WebArchive& archive : kWebArchives)
+                found.web.push_back(joined(directory, archive.installed));
+            found.web.insert(found.web.end(), std::begin(kWebSystem), std::end(kWebSystem));
+#endif
+        }
+
+        void findRuntime(Toolchain& found)
+        {
+            if (const char* chosen = environment("FMINUS_RUNTIME_DIR"))
+            {
+                fromDirectory(found, chosen, "FMINUS_RUNTIME_DIR");
+                return;
+            }
+            if (const std::string installed = besideExecutable(); !installed.empty())
+            {
+                fromDirectory(found, installed,
+                              "installed: " FMINUS_INSTALL_RUNTIME_RELATIVE " from the executable's directory");
+                if (!found.runtime.empty())
+                    return;
+            }
+            found.runtimeTried.emplace_back(FMINUS_RUNTIME_LIBRARY);
+            if (!isFile(FMINUS_RUNTIME_LIBRARY))
+                return;
+            found.runtime = FMINUS_RUNTIME_LIBRARY;
+            found.runtimeFrom = "the build tree this FMinus was built in";
+#if FMINUS_HAS_WEB
+            for (const WebArchive& archive : kWebArchives)
+                found.web.emplace_back(archive.built);
+            found.web.insert(found.web.end(), std::begin(kWebSystem), std::end(kWebSystem));
+#endif
+        }
+
+        // `name`, as the system finds a program by it: a path as it is, if it is one; a bare name on PATH.
+        std::string program(const std::string& name)
+        {
+            if (llvm::sys::path::has_parent_path(name))
+                return llvm::sys::fs::can_execute(name) ? name : std::string();
+            llvm::ErrorOr<std::string> found = llvm::sys::findProgramByName(name);
+            return found ? *found : std::string();
+        }
+
+        void findDriver(Toolchain& found)
+        {
+            if (const char* chosen = environment("FMINUS_LINK_DRIVER"))
+            {
+                found.driverTried.push_back(std::string(chosen) + " (FMINUS_LINK_DRIVER)");
+                found.driver = program(chosen);
+                found.driverFrom = "FMINUS_LINK_DRIVER";
+                return;
+            }
+            found.driverTried.push_back(std::string(FMINUS_AOT_DRIVER) + " (the compiler FMinus was built with)");
+            if (std::string built = program(FMINUS_AOT_DRIVER); !built.empty())
+            {
+                found.driver = std::move(built);
+                found.driverFrom = "the compiler FMinus was built with";
+                return;
+            }
+#ifdef _WIN32
+            static constexpr const char* kSystem[] = {"clang-cl"};
+#else
+            static constexpr const char* kSystem[] = {"c++", "clang++"};
+#endif
+            for (const char* name : kSystem)
+            {
+                found.driverTried.push_back(std::string(name) + " (on PATH)");
+                if (std::string onPath = program(name); !onPath.empty())
+                {
+                    found.driver = std::move(onPath);
+                    found.driverFrom = std::string("the system's ") + name + ", on PATH";
+                    return;
+                }
+            }
+        }
+
+        std::string listed(const std::vector<std::string>& items)
+        {
+            std::string text;
+            for (const std::string& item : items)
+                text += (text.empty() ? "" : ", ") + item;
+            return text;
+        }
+    } // namespace
+
+    Toolchain findToolchain()
+    {
+        Toolchain found;
+        findRuntime(found);
+        findDriver(found);
+        return found;
+    }
+
     llvm::Error linkExecutable(const LinkOptions& options)
     {
-        std::string driver = FMINUS_AOT_DRIVER;
-        if (const char* chosen = std::getenv("FMINUS_LINK_DRIVER"); chosen != nullptr && *chosen != '\0')
-            driver = chosen;
-        llvm::ErrorOr<std::string> program = llvm::sys::findProgramByName(driver);
-        if (!program)
-            return llvm::createStringError(program.getError(), "linkExecutable: cannot find the driver " + driver);
+        const Toolchain toolchain = findToolchain();
+        if (toolchain.driver.empty())
+            return llvm::createStringError(
+                "linkExecutable: no C++ compiler to link with: tried " + listed(toolchain.driverTried)
+                + ". An executable is linked by a C++ toolchain: install one (clang or GCC; on macOS, Xcode's command "
+                  "line tools; on Windows, Visual Studio's C++ Clang tools, from its developer prompt), or name its "
+                  "driver in FMINUS_LINK_DRIVER");
+        if (options.linkRuntime && toolchain.runtime.empty())
+            return llvm::createStringError(
+                "linkExecutable: cannot find the FMinus runtime: no " + listed(toolchain.runtimeTried)
+                + ". Set FMINUS_RUNTIME_DIR to the directory that holds " FMINUS_RUNTIME_NAME);
 
-        std::vector<std::string> args{*program};
+        std::vector<std::string> args{toolchain.driver};
         args.insert(args.end(), options.objects.begin(), options.objects.end());
         if (options.linkRuntime)
         {
-            args.emplace_back(FMINUS_RUNTIME_LIBRARY);
+            args.push_back(toolchain.runtime);
             if (const std::string sanitize = FMINUS_AOT_SANITIZE; !sanitize.empty())
                 args.push_back("-fsanitize=" + sanitize);
         }
-#if FMINUS_HAS_WEB
         if (options.linkWeb)
-        {
-            static constexpr const char* kWebLink[] = {
-#include "support/WebLink.inc"
-            };
-            args.insert(args.end(), std::begin(kWebLink), std::end(kWebLink));
-        }
-#endif
+            args.insert(args.end(), toolchain.web.begin(), toolchain.web.end());
         args.insert(args.end(), options.driverArgs.begin(), options.driverArgs.end());
         args.emplace_back("-o");
         args.push_back(options.output);
 
         const std::vector<llvm::StringRef> argRefs(args.begin(), args.end());
         std::string message;
-        const int status = llvm::sys::ExecuteAndWait(*program, argRefs, std::nullopt, {}, 0, 0, &message);
+        const int status = llvm::sys::ExecuteAndWait(toolchain.driver, argRefs, std::nullopt, {}, 0, 0, &message);
         if (status != 0)
         {
             std::string command;

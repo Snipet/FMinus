@@ -1,11 +1,14 @@
-// src/support/Aot.h: ahead-of-time compilation, for development. It writes a module's machine code to an object or
-// assembly file, and links objects into a native executable with the FMinus runtime (runtime/Runtime.h).
+// src/support/Aot.h: ahead-of-time compilation. It writes a module's machine code to an object or assembly file, and
+// links objects into a native executable with the FMinus runtime (runtime/Runtime.h): what `fminus prog.fm -o prog`
+// does, in a build tree and in an install (docs/building.md, "Installing").
 //
 // An executable built this way runs under lldb and Instruments like any program. For the same module, TargetMachine
-// (support/HostTarget.h) and pipeline, its code is what LLJIT would generate. Linking runs the C++ compiler driver this
-// build tree was configured with (Xcode's clang on macOS; $FMINUS_LINK_DRIVER overrides it) against this tree's
-// libfminus_runtime.a, so it only works on a development machine: FMinus inside a plugin only ever JITs. An integration
-// piece that came with the project skeleton.
+// (support/HostTarget.h) and pipeline, its code is what LLJIT would generate (on macOS, but for how it addresses
+// memory: HostTarget.h). Linking runs a C++ compiler driver (findToolchain: $FMINUS_LINK_DRIVER, else the
+// compiler FMinus was built with, Xcode's clang on macOS, if it is there, else the system's) against the runtime's
+// archives, which an installed fminus finds beside itself and a build tree's in its tree. A machine that links
+// executables needs a C++ toolchain; one that only JITs needs nothing (FMinus inside a plugin only ever JITs). An
+// integration piece that came with the project skeleton.
 #pragma once
 
 #include <llvm/Support/Error.h>
@@ -32,19 +35,46 @@ namespace fminus::aot
     // Generates machine code for `module`, which prepareModule set up for `machine`, into `path` ("-": stdout).
     llvm::Error emitFile(llvm::Module& module, llvm::TargetMachine& machine, const std::string& path, FileKind kind);
 
+    // What linkExecutable links with, and how it found each part: what `fminus --print-runtime` prints.
+    //
+    // The runtime's archives: in the directory $FMINUS_RUNTIME_DIR names, when it is set (and nowhere else); else in
+    // the installed layout beside the running executable, <bin>/../lib/fminus (FMINUS_INSTALL_RUNTIME_RELATIVE: what
+    // `cmake --install` lays out, packaging/CMakeLists.txt), so that a prefix can be moved or unpacked anywhere; else
+    // in the build tree this FMinus was built in (its lib/, and the deps cache's libcurl and Mbed TLS), if it is still
+    // there. The C++ compiler driver that links: $FMINUS_LINK_DRIVER, when it is set (and nothing else); else the one
+    // this FMinus was built with (FMINUS_AOT_DRIVER), if it is there; else the system's, by name on PATH: c++, then
+    // clang++ (clang-cl on Windows).
+    struct Toolchain
+    {
+        std::string runtime;                    // libfminus_runtime.a (fminus_runtime.lib); empty: not found
+        std::string runtimeFrom;                // how it was found
+        std::vector<std::string> runtimeTried;  // where it was looked for, in order
+        // In a build with the web library (FMINUS_WEB): libfminus_web.a and libcurl's and its TLS library's archives,
+        // from the same place as the runtime, in link order, and then the system libraries they need, as the driver
+        // takes them (-pthread; -framework Security, ...; ws2_32.lib, ...).
+        std::vector<std::string> web;
+        std::string driver;                     // the driver's path; empty: none found
+        std::string driverFrom;                 // how it was found
+        std::vector<std::string> driverTried;   // what was looked for, in order
+    };
+
+    // Looks for the runtime and the driver, as linkExecutable does each time it links.
+    Toolchain findToolchain();
+
     struct LinkOptions
     {
         std::string output;                      // the executable
         std::vector<std::string> objects{};      // object files and archives, in link order
         std::vector<std::string> driverArgs{};   // to the driver as they are: -framework Accelerate, -lm, -v, ...
-        bool linkRuntime = true;                 // libfminus_runtime.a (and this tree's sanitizer runtimes)
+        bool linkRuntime = true;                 // libfminus_runtime.a (and the build's sanitizer runtimes)
         // libfminus_web.a, libcurl's and its TLS library's archives and the system libraries they need, in a build
         // with the web library (FMINUS_WEB): emitExecutable sets it when the module calls the web library, and leaves
         // it as given otherwise.
         bool linkWeb = false;
     };
 
-    // Links `options.objects` into `options.output` through the compiler driver.
+    // Links `options.objects` into `options.output` through the compiler driver findToolchain finds, with the runtime's
+    // archives it finds. Fails, naming where it looked, when it finds no driver, or no runtime when it is to link one.
     llvm::Error linkExecutable(const LinkOptions& options);
 
     // Writes the module's object to a temporary file and links it, ahead of `options.objects`, into `options.output`,

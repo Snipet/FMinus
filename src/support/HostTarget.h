@@ -22,6 +22,20 @@ namespace fminus
     llvm::Expected<std::unique_ptr<llvm::TargetMachine>>
     hostTargetMachine(llvm::CodeGenOptLevel level = llvm::CodeGenOptLevel::Aggressive);
 
+    // The TargetMachine that writes a module hostTargetMachine's pipeline optimised to an object or an assembly file
+    // (support/Aot.h: emitFile, emitExecutable), generating code at `level`. On an ELF system (Linux) it is
+    // hostTargetMachine's with the code model and the relocation model LLJIT gives JITLink, the JIT's linker there:
+    // small and position-independent, so that the file holds the code the JIT generates there, and the system's linker
+    // takes it into an executable (a PIE) as it is. hostTargetMachine keeps the target's defaults for a JIT, which on
+    // x86-64 and arm64 Linux are the large code model and static relocations: an object of that code has relocations
+    // in its text (`.ltext`), which the linker warns of in a PIE (DT_TEXTREL) and a hardened system refuses to load.
+    // Elsewhere it is hostTargetMachine's, as before: on Windows, where RuntimeDyld links the JIT's code, the JIT's
+    // own settings; on macOS the large code model, position-independent, where LLJIT gives JITLink the small one. The
+    // pipeline (optimiseModule) runs with hostTargetMachine's either way, as the JIT's does: only the machine code
+    // differs.
+    llvm::Expected<std::unique_ptr<llvm::TargetMachine>>
+    hostFileTargetMachine(llvm::CodeGenOptLevel level = llvm::CodeGenOptLevel::Aggressive);
+
     // The code generation level that goes with an optimisation level (O0 None, O1 Less, O2 Default, O3 Aggressive).
     llvm::CodeGenOptLevel codeGenLevel(llvm::OptimizationLevel level);
 

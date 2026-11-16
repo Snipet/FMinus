@@ -1,5 +1,5 @@
 // examples/hello/main.cpp: FMinus as a library, at its smallest. A C++ main JIT-compiles an FMinus program from a
-// string and calls one of its functions (README.md, "Using FMinus as a library").
+// string and calls one of its functions (docs/library.md).
 #include "fminus/FMinus.h"
 
 #include <cstdio>

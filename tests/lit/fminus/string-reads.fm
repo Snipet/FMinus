@@ -1,4 +1,4 @@
-// Text from a document and a listing (src/ir/Calls.cpp's textResult; docs/files.md, README.md): json_string,
+// Text from a document and a listing (src/ir/Calls.cpp's textResult; docs/files.md, docs/language.md): json_string,
 // xml_string and file_name call the runtime's function with the address of an int of the frame, where it writes the
 // length of the bytes whose address it returns, and make the pair; json_string's and xml_string's fallback is chosen,
 // member by member, when the address is null. The functions are declared as reads (no allocation, no lock), writing

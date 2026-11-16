@@ -511,7 +511,7 @@ still-dial arithmetic out of loops (README) [H]. For a compiled circuit the froz
   must be identical in both builds; only constants may differ. Switching to a table or a modal realization only when
   frozen would need a state mapping at the switch (§9).
 - **FMA:** FMinus fuses nothing ("FMinus fuses and reassociates nothing",
-  [README](../../../../README.md#notes-for-running-inside-a-plugin)) and has no `fmaf` builtin, so every MAC in the
+  [library.md](../../../library.md#notes-for-running-inside-a-plugin)) and has no `fmaf` builtin, so every MAC in the
   generated matrix code is two instructions with two roundings. An explicit fma builtin would halve the linear-part
   instruction count and stay deterministic on AArch64 [L].
 

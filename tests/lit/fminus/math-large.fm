@@ -17,7 +17,8 @@
 // RUN: fminus %s -O2 --poly-lanes 8 | FileCheck %s --check-prefix=IR
 // RUN: %if avx %{ fminus %s -O2 --poly-lanes 8 | FileCheck %s --check-prefix=AVX %}
 // RUN: %if !avx %{ fminus %s -O2 --poly-lanes 8 | FileCheck %s --check-prefix=PLAIN --implicit-check-not=vzeroupper %}
-// RUN: %if avx %{ fminus %s -O2 --poly-lanes 8 --emit asm -o - | FileCheck %s --check-prefix=AVXASM %}
+// RUN: %if avx && system-linux %{ fminus %s -O2 --poly-lanes 8 --emit asm -o - | FileCheck %s --check-prefixes=AVXASM,AVXASM-SMALL %}
+// RUN: %if avx && !system-linux %{ fminus %s -O2 --poly-lanes 8 --emit asm -o - | FileCheck %s --check-prefixes=AVXASM,AVXASM-LARGE %}
 
 // Whether two floats are the same result: equal, or both NaN.
 bool same(float a, float b)
@@ -90,14 +91,18 @@ float main(float big)
 // AVX-NEXT:   call void @llvm.x86.avx.vzeroupper()
 // AVX:      attributes #[[LARGE]] = { cold nofree noinline nosync nounwind willreturn memory(none) "target-features"="{{.*}}+avx,{{(.*,)?}}-vzeroupper" }
 
-// In the machine code, the wrapper's one vzeroupper comes before the runtime's call (the JIT's code model calls it
-// through a register), and none after it: the restores of ymm1-ymm15 are the last thing before the return. The load
-// of the function's address may come before vzeroupper or after it, by the host CPU (with AVX-512 the argument waits
-// in xmm16, which vzeroupper leaves alone): either order passes, both before the call.
-// AVXASM-LABEL: fminus.large.sin:
-// AVXASM-DAG:     vzeroupper
-// AVXASM-DAG:     fminus_rt_sinf
-// AVXASM:         call
+// In the machine code, the wrapper's one vzeroupper comes before the runtime's call, and none after it: the restores of
+// ymm1-ymm15 are the last thing before the return. On Linux the call is direct, in the small code model, which the
+// JIT's code there and an object file have (support/HostTarget.h); elsewhere the large code model calls through a
+// register, and the load of the function's address may come before vzeroupper or after it, by the host CPU (with
+// AVX-512 the argument waits in xmm16, which vzeroupper leaves alone): either order passes, both before the call.
+// AVXASM-LABEL:     fminus.large.sin:
+// AVXASM-SMALL:     vzeroupper
+// AVXASM-SMALL-NOT: ret
+// AVXASM-SMALL:     call{{q?}} fminus_rt_sinf
+// AVXASM-LARGE-DAG: vzeroupper
+// AVXASM-LARGE-DAG: fminus_rt_sinf
+// AVXASM-LARGE:     call
 // AVXASM-NOT:     vzeroupper
 // AVXASM:         , %ymm{{[0-9]+}}
 // AVXASM-NOT:     vzeroupper

@@ -61,8 +61,8 @@ tested in the dev and asan presets, every test passing (recipes 38 to 51 in the 
 [architecture.md](architecture.md) describes the stages they touch.
 
 FMinus follows C. When a recipe has a semantic choice to make, it makes C's: conversions, short-circuiting, which
-`if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. The README lists
-the few deliberate deviations.
+`if` an `else` belongs to, what `continue` does in a `for`. And it reports errors in clang's words. [language.md](language.md#where-fminus-differs-from-c)
+lists the few deliberate deviations.
 
 ## How a change moves through the compiler
 
@@ -81,7 +81,7 @@ Most language features touch the same places, in this order:
 `DeferTest.cpp`, `SelectionDeclarationTest.cpp`, `ServeTest.cpp`, `StringTypeTest.cpp`, `WhenTest.cpp`, `HoleTest.cpp`, `DocumentTextTest.cpp`, `WithinTest.cpp` or `JsonReadTest.cpp` (their helpers are in `Compile.h`; a runtime function that must not allocate is counted with `HeapCalls.h`); IR or errors in `tests/lit/fminus/` |
 | 9 | `examples/` | a program that uses it, and a line in `tests/lit/fminus/examples.test` that runs it |
 | 10 | `editors/vscode/syntaxes/fminus.tmLanguage.json` | a new keyword, type or builtin, so VSCode highlights it (its README says where) |
-| 11 | `README.md` | the language table, and the deviations from C if any |
+| 11 | `docs/language.md` | the language table, and the deviations from C if any |
 
 Steps 3 to 5 need no searching. Once the node exists, the build fails at every walk that doesn't handle it yet: a
 `std::visit` without a matching lambda fails to compile, and a `switch` without the new enumerator trips `-Wswitch`,
@@ -3029,7 +3029,7 @@ The dev build on an M5, while five other builds ran, so about ±10%:
 *In the compiler. Pass: `src/opt/ZeroInitElision.h` and `ZeroInitElision.cpp`, registered in `optimiseModule`
 (`src/support/HostTarget.cpp`). Tests: `tests/unit/ZeroInitTest.cpp` (`[zeroinit]`), `tests/lit/fminus/zeroinit.fm`.*
 
-FMinus starts every variable at 0, where C leaves a local indeterminate (the README's deviations). For an array that is
+FMinus starts every variable at 0, where C leaves a local indeterminate (language.md's deviations). For an array that is
 a memset where it is declared (`zero()`, `Memory.cpp`), and the memset runs every time the declaration does: once a
 call, or once an iteration for an array declared in a loop body. A scratch buffer pays for it on every block:
 
@@ -3277,7 +3277,7 @@ module or returns is made, and is null when the runtime refuses it, as `HeapTest
 
 ### libm's prototypes, where libm sets no errno
 
-A prototype with no definition calls the process's C function of its name (README.md): `float asinf(float x);` calls
+A prototype with no definition calls the process's C function of its name ([language.md](language.md)): `float asinf(float x);` calls
 libm's. LLVM knows libm's functions by name and type (`TargetLibraryInfo`), and InferFunctionAttrs, in the pipeline,
 gives their declarations what C promises of them: `nounwind willreturn nofree nosync`, and `memory(errnomem: write)`,
 since C lets a math function report a domain or range error in `errno`. A call that writes memory stays where it is:
@@ -4642,7 +4642,7 @@ element; an array without a list is a `zeroinitializer`. From `-O2` a constant i
 
 The one thing C could tell apart is the address. Each call of a C function has its own local array, so nested calls
 of one function hold two; a table is one object for every call, and `unnamed_addr` lets LLVM merge two equal tables
-into one, so a comparison of pointers into two of them (`p == q`) can find them the same. The README lists it with the
+into one, so a comparison of pointers into two of them (`p == q`) can find them the same. language.md lists it with the
 deviations.
 
 ### What it changes for programs and hosts
@@ -4834,7 +4834,7 @@ say `'int'`. (Recipe 32's `int` carries which enumeration it is, for `-Wswitch`,
 - **Programs gain** `switch`, labels and enumerations. `switch`, `case`, `default` and `enum` are keywords: a program
   with a variable, a parameter or a function of one of those names renames it, and the circuit compiler refuses them as
   a netlist's names (`isFMinusKeyword`). `[[fminus::default(...)]]` is unchanged. Nothing else compiles differently.
-- **A jump past a declaration** finds the variable 0, where C leaves it indeterminate (the README's deviations).
+- **A jump past a declaration** finds the variable 0, where C leaves it indeterminate (language.md's deviations).
 - **Hosts need nothing**: an enumeration holds no memory, so no module's layout changes, and a `param enum Mode` is a
   `param int` to a host, its range and default as written.
 
@@ -7895,10 +7895,12 @@ them: `WebSymbols.def` lists them under `FMINUS_WEB_MAIN_SYMBOL`, which `Constan
 and `JitRuntime.cpp` does not (a JIT never defines them), and `declare` (`Functions.cpp`) refuses a function of a
 program, a prototype or a definition, whose name begins `fminus_web_` (`ir::kWebPrefix`), in every build, so that a
 program cannot call the library past its literals and `webRequests()`. `emitExecutable` links the web library's archives only when the module
-declares a `fminus_web_` function: `src/CMakeLists.txt` writes the list (`libfminus_web.a`, then `FMINUS_WEB_LINK`
-from `FMinusWeb.cmake`: libcurl's and Mbed TLS's archives and the system libraries libcurl's own CMake links on the
-platform) into `generated/support/WebLink.inc`, which `linkExecutable` includes. An executable that makes no request
-is linked as before.
+declares a `fminus_web_` function: `src/CMakeLists.txt` writes the list (`libfminus_web.a`, then
+`FMINUS_WEB_ARCHIVES` from `FMinusWeb.cmake`, libcurl's and Mbed TLS's archives, each with its path in the build tree
+or the deps cache and its file's name in an install's `lib/fminus/`, then `FMINUS_WEB_SYSTEM_LIBRARIES`, the system
+libraries libcurl's own CMake links on the platform) into `generated/support/WebLink.inc`, which `linkExecutable`
+includes (`findToolchain` takes the archives from where it finds the runtime's: building.md, "Installing"). An
+executable that makes no request is linked as before.
 
 ### The scaffolding stays
 

@@ -1,6 +1,6 @@
 // include/fminus/FMinus.h: FMinus as a C++ library. A Program compiles FMinus source while the host runs, for the CPU
 // it runs on, and gives its functions as C function pointers. This is the one header a host includes: it has no LLVM
-// in it and needs C++17, and the host links FMinus::FMinus (README.md, "Using FMinus as a library").
+// in it and needs C++17, and the host links FMinus::FMinus (docs/library.md).
 //
 //   std::string errors;
 //   auto program = fminus::Program::compile(source, errors);           // nullptr when it does not compile

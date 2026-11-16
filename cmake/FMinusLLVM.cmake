@@ -17,6 +17,9 @@
 #   FMINUS_LLVM_TOOLS_DIR      FileCheck, not, count, opt, llc, llvm-mca, ...
 #   FMINUS_LIT_DIR             the directory holding lit's Python package; empty: `import lit` from Python's own path
 #   FMINUS_LLVM_TOOL_TARGETS   inline mode only: the tool targets lit needs built
+#   FMINUS_LLVM_LICENSE        LLVM's LICENSE.TXT, which an install of fminus carries (packaging/CMakeLists.txt): the
+#                              cache's install of the flavor (each flavor built from now on has a copy), else the
+#                              deps cache's source, else an LLVM of the system's own; empty when none has it
 include(FetchContent)
 
 set(FMINUS_LLVM_MODE "cache" CACHE STRING "Where LLVM comes from: cache, inline or system")
@@ -238,9 +241,11 @@ if(FMINUS_LLVM_MODE STREQUAL "cache")
     if(NOT _rc EQUAL 0)
       message(FATAL_ERROR "FMinus: building LLVM failed (${_rc}); build tree ${_bdir}. Reconfiguring resumes it.")
     endif()
-    # lit (Python) comes with the install, so the tests need nothing from the source tree.
+    # lit (Python) comes with the install, so the tests need nothing from the source tree; and so does LLVM's license,
+    # which an install of fminus, which links LLVM, carries (packaging/CMakeLists.txt).
     file(COPY "${FMINUS_LLVM_SOURCE_DIR}/llvm/utils/lit/lit" DESTINATION "${FMINUS_LLVM_PREFIX}/utils/lit"
          PATTERN "__pycache__" EXCLUDE)
+    file(COPY "${FMINUS_LLVM_SOURCE_DIR}/llvm/LICENSE.TXT" DESTINATION "${FMINUS_LLVM_PREFIX}")
     file(WRITE "${_stamp}" "${_fminus_llvm_script}")
     message(STATUS "FMinus: LLVM ${FMINUS_LLVM_FLAVOR} installed in ${FMINUS_LLVM_PREFIX}")
   endif()
@@ -319,6 +324,17 @@ else()
 endif()
 
 set(FMINUS_LLVM_PACKAGE_VERSION "${LLVM_PACKAGE_VERSION}")
+
+# LLVM's license, for an install's notices: a flavor installed before its install held a copy (or unpacked from an
+# archive of one) has it in the deps cache's source, if that is there.
+set(FMINUS_LLVM_LICENSE "")
+foreach(_dir FMINUS_LLVM_PREFIX FMINUS_LLVM_SOURCE_DIR LLVM_BUILD_MAIN_SRC_DIR LLVM_INSTALL_PREFIX)
+  foreach(_license "${${_dir}}/LICENSE.TXT" "${${_dir}}/llvm/LICENSE.TXT")
+    if(${_dir} AND NOT FMINUS_LLVM_LICENSE AND EXISTS "${_license}" AND NOT IS_DIRECTORY "${_license}")
+      set(FMINUS_LLVM_LICENSE "${_license}")
+    endif()
+  endforeach()
+endforeach()
 
 # ---- FMinus::LLVM ---------------------------------------------------------------------------------------------------
 add_library(fminus_llvm INTERFACE)

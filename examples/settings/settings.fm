@@ -1,4 +1,4 @@
-// examples/settings/settings.fm: a synth's settings read from a JSON document in one call (README.md, the language;
+// examples/settings/settings.fm: a synth's settings read from a JSON document in one call (docs/language.md;
 // docs/extending.md, recipe 50). json_read fills a module from the object at a path, each field from the member of
 // its name (or its [[json::name]]), in one walk of the object: a number only when it is inside the field's
 // fminus::range, an enumeration from its constant's name or its number, a char array from a string that fits, a

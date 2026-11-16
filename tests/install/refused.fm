@@ -1,0 +1,10 @@
+// The install test's program that calls the web library (tests/install/InstallTest.cmake, a build with FMINUS_WEB): its
+// executable links the installed web library's archives. Run without FMINUS_WEB_ALLOW, it may reach nothing, so its
+// request is refused before anything is sent, and it prints 1.
+float main()
+{
+    void* r = http_get("http://127.0.0.1:1/presets/%d.json", 1);
+    const int status = http_wait(r, -1);
+    http_close(r);
+    return status == HTTP_REFUSED ? 1.0f : 0.0f;
+}

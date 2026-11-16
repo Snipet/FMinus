@@ -93,7 +93,7 @@ namespace fminus::ast
     // initialiser, an assignment, an argument, an operand of == or !=, a case of a switch on a string), its bytes a
     // constant of the program. Two compare with == and != by content; nothing joins, orders or indexes them (the
     // string_* builtins read one). A declaration without an initialiser is the empty string, a null pointer and 0. It
-    // lives as long as what it points into, which the compiler does not check (README.md). Arrays of strings are
+    // lives as long as what it points into, which the compiler does not check (docs/language.md). Arrays of strings are
     // allowed, as of handles: an array's name stands for a pointer to its first, which no variable can hold.
     //
     // char is an array's element type and a pointer's pointee only, a byte: `char name[32];`, `const char* p`. No

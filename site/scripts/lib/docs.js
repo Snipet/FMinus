@@ -1,5 +1,5 @@
-// The internals: docs/*.md (architecture, programs, extending, simd, building, testing, recipes/) and the README's
-// language section, as pages. Markdown is rendered at build time with markdown-it; headings get GitHub's ids (so
+// The internals: docs/*.md (architecture, programs, language, library, extending, simd, building, testing, recipes/),
+// as pages. Markdown is rendered at build time with markdown-it; headings get GitHub's ids (so
 // `building.md#windows` still lands), links between docs go to the site's pages, links and `paths` to the
 // repository's files go to GitHub, and code is highlighted with Shiki.
 import fs from 'node:fs';
@@ -11,7 +11,6 @@ import { escapeHtml } from './text.js';
 
 const README = 'README.md';
 const DOCS = 'docs';
-const LANGUAGE = /^## The language\b.*$/m;
 
 export function generateDocs({ highlightBlock }) {
 	const md = new MarkdownIt({ html: false, linkify: false, typographer: false, highlight: (code, lang) => highlightBlock(code, lang) });
@@ -32,8 +31,6 @@ export function generateDocs({ highlightBlock }) {
 		if (pages.some((p) => p.slug === page.slug)) throw new GenerateError(`two documents would be the page /internals/${page.slug}/`);
 		pages.push(page);
 	};
-	const language = readLanguage();
-	add({ slug: 'language', source: README, markdown: language.markdown, description: language.firstParagraph, excerpt: true, anchor: language.anchor });
 	for (const { target, description } of listed) {
 		const source = docFile(target);
 		if (!source) throw new GenerateError(`${DOCS}/README.md lists ${target}, which is not a document in the repository`);
@@ -67,7 +64,7 @@ export function generateDocs({ highlightBlock }) {
 	pageBySource.set(DOCS, indexPage);
 	if (recipes) pageBySource.set(`${DOCS}/recipes`, recipes);
 
-	const context = { pages: all, pageBySource, patches, recipes, language: pages.find((p) => p.slug === 'language') };
+	const context = { pages: all, pageBySource, patches, recipes };
 	const rendered = all.map((page) => renderPage(md, page, context));
 
 	const search = rendered.flatMap((p) => p.headings.filter((h) => h.level <= 3).map((h) => ({
@@ -97,8 +94,7 @@ export function generateDocs({ highlightBlock }) {
 			title: h1 ? h1.text : page.slug,
 			url: page.slug ? route(`/internals/${page.slug}/`) : route('/internals/'),
 			source: page.source,
-			// an excerpt's source is its section of the file, which GitHub shows rendered: its heading's anchor
-			sourceUrl: githubUrl(page.source, page.anchor ? `#${page.anchor}` : ''),
+			sourceUrl: githubUrl(page.source),
 			descriptionHtml: page.description ? renderDescription(md, page.description, page, context) : '',
 			html,
 			headings: env.headings,
@@ -209,13 +205,11 @@ function rewriteHref(href, env) {
 	const hash = hashAt >= 0 ? href.slice(hashAt) : '';
 	if (target === '') {
 		if (page.ids.has(decodeURIComponent(hash.slice(1)))) return hash;
-		if (page.excerpt) return githubUrl(page.source, hash); // a README section the excerpt doesn't hold
 		throw new GenerateError(`${page.source}: the link ${href} names no heading of this document`);
 	}
 	const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(page.source), decodeURI(target))).replace(/\/$/, '');
 	if (resolved.startsWith('..')) throw new GenerateError(`${page.source}: the link ${href} leaves the repository`);
-	let dest = context.pageBySource.get(resolved);
-	if (resolved === README) dest = hash && context.language?.ids.has(hash.slice(1)) ? context.language : null;
+	const dest = context.pageBySource.get(resolved);
 	if (dest) {
 		if (hash && !dest.ids.has(decodeURIComponent(hash.slice(1)))) {
 			throw new GenerateError(`${page.source}: the link ${href} names no heading of ${dest.source}`);
@@ -247,30 +241,6 @@ function docFile(target) {
 function slugOf(source) {
 	const rel = source.replace(/^docs\//, '').replace(/\/README\.md$/, '').replace(/\.md$/, '');
 	return rel.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-}
-
-/** The README's language section: from its heading to the next of its level, as a page of its own. */
-function readLanguage() {
-	const readme = read(README);
-	const m = LANGUAGE.exec(readme);
-	if (!m) throw new GenerateError(`${README}: no "## The language" section, which is the language page`);
-	const after = readme.slice(m.index + m[0].length);
-	const next = after.search(/^## /m);
-	const body = next >= 0 ? after.slice(0, next) : after;
-	// its heading's anchor on GitHub: the README's headings slugged in order, as GitHub does
-	const line = readme.slice(0, m.index).split('\n').length;
-	const slugger = new GithubSlugger();
-	let anchor = null;
-	const parsed = new MarkdownIt().parse(readme, {});
-	for (let i = 0; i < parsed.length; i++) {
-		if (parsed[i].type !== 'heading_open') continue;
-		const slug = slugger.slug(headingText(parsed[i + 1]));
-		if (parsed[i].map?.[0] === line - 1) anchor = slug;
-	}
-	if (!anchor) throw new GenerateError(`${README}:${line}: the language section's heading has no anchor`);
-	// its first paragraph describes it in the list of documents
-	const firstParagraph = (body.trim().split(/\n\s*\n/)[0] ?? '').replace(/\s*\n\s*/g, ' ');
-	return { markdown: `#${m[0].slice(2)}\n${body}`, anchor, firstParagraph };
 }
 
 function readIntro(md) {

@@ -1,0 +1,303 @@
+# The prebuilt compiler: an archive of an installed FMinus for each platform, to unpack anywhere and use as any compiler
+# (docs/building.md, "Installing"): fminus-<version>-<os>-<arch>.tar.gz (a .zip on Windows), holding bin/fminus,
+# lib/fminus/ (the runtime's archives, which fminus links into every executable it makes) and share/doc/fminus/ (the
+# license and the dependencies' notices), under a top directory of the archive's name (packaging/CMakeLists.txt).
+#
+# Each build job configures and builds the release preset (Release, LLVM without assertions) with its default
+# features, JSON, XML and the file interface's reading, and runs the test "install" (tests/install/: the build installed,
+# moved and run from where it lands). It packs the archive with CPack, moves the build tree aside, unpacks the archive
+# into a fresh directory and runs the compiler from there: --version, --print-runtime (which must find the runtime in
+# the unpacked directory), --run, and an executable made and run. The archives and their SHA-256 are the run's
+# artifacts (7 days). With "release" ticked, on main or on a tag only, the release job attaches them to a draft GitHub
+# release, v<version> (or the tag the run is on), which a maintainer reads and publishes by hand; a release already
+# published is never changed.
+#
+# The archives leave out the web library (FMINUS_WEB, off in the release preset): its macOS and Windows code has never
+# been built or run, it would add libcurl and Mbed TLS (and their notices) to every archive, and a program's network is
+# a choice to make when building FMinus. A build from source with -DFMINUS_WEB=ON installs it the same way.
+#
+# The Linux archive is built on Ubuntu 24.04 and needs a C library and a C++ library as new as the ones it links there
+# (a build there asks for glibc 2.38 and GCC 13's libstdc++, GLIBCXX_3.4.32): an older distribution cannot run it, and
+# builds from source instead. The macOS archive needs macOS 14 (CMakeLists.txt's CMAKE_OSX_DEPLOYMENT_TARGET) on Apple
+# silicon; the Windows one, Windows on x64. Making an executable needs a C++ toolchain on the machine that runs fminus
+# (on Windows, Visual Studio's C++ Clang tools and its developer prompt); --run needs nothing.
+#
+# LLVM comes from the deps cache (FMINUS_DEPS_DIR), kept between runs by actions/cache, as in wheels.yml; with no LLVM of
+# the pinned version in it, from the Deps workflow's archive for the platform (the release deps-llvm-<version>), whose
+# LLVM is the release preset's flavor. On Linux that archive is built on Arch Linux: its static libraries link on
+# Ubuntu 24.04, but its Bison does not run there, so the Linux job takes Ubuntu's Bison and Flex
+# (FMINUS_PARSER_TOOLS_MODE=system: 3.8.2 and 2.6.4, the pinned versions). Without an archive the configure builds LLVM
+# (an hour or more on a hosted runner), and the cache keeps it. A flavor installed before cmake/FMinusLLVM.cmake put
+# LLVM's LICENSE.TXT in it (the Deps workflow's archives so far) gets it from the pinned llvm-project source release,
+# checked against its SHA-256: the archive's bin/fminus links LLVM and carries its license.
+# On Windows the job runs in Visual Studio's developer environment, as deps.yml's does: the build, and fminus's link of
+# an executable through clang-cl, need it.
+#
+# Each action is pinned to its release's full commit SHA, with the tag in a comment (as in pages.yml).
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Attach the archives to a draft GitHub release v<version> (on main or a tag only)"
+        type: boolean
+        default: false
+      platforms:
+        description: "Build only these (space-separated: linux-x64 macos-arm64 windows-x64); empty: all"
+        type: string
+        default: ""
+
+# nothing by default; each job asks for what it needs
+permissions: {}
+
+# one run at a time per branch and choice of platforms
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.platforms }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          all='[{"platform": "linux-x64", "os": "ubuntu-24.04"},
+                {"platform": "macos-arm64", "os": "macos-latest"},
+                {"platform": "windows-x64", "os": "windows-latest"}]'
+          matrix=$(jq -c --arg p "$PLATFORMS" \
+            '[.[] | select(.platform as $x | ($p | split(" ") | map(select(. != ""))) as $want
+                             | ($want | length) == 0 or ($want | index($x)) != null)]' <<< "$all")
+          [ "$matrix" != "[]" ] || { echo "no platform named '$PLATFORMS'"; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+
+  build:
+    needs: plan
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang ninja-build bison flex libfl-dev
+          clang++ --version; bison --version | head -1; flex --version
+
+      - name: Visual Studio's developer environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $clang = 'Microsoft.VisualStudio.Component.VC.Llvm.Clang'
+          $vs = & $vswhere -latest -products * -requires $clang -property installationPath
+          if (-not $vs) { throw "no Visual Studio with its C++ Clang tools" }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              "$($matches[1])=$($matches[2])" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+
+      # The deps cache, outside the checkout.
+      - name: Deps cache (where)
+        id: deps
+        run: |
+          dir="$(cygpath -m "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")/fminus-deps"
+          mkdir -p "$dir/install"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "FMINUS_DEPS_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Deps cache (restore)
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.deps.outputs.dir }}/install
+          key: release-deps-${{ matrix.platform }}-${{ hashFiles('cmake/FMinusPins.cmake', 'cmake/FMinusLLVM.cmake', 'cmake/FMinusParserTools.cmake') }}
+          restore-keys: release-deps-${{ matrix.platform }}-
+
+      - name: Prebuilt dependencies (the Deps workflow's)
+        if: steps.cache.outputs.cache-hit != 'true'
+        continue-on-error: true   # without them, the build makes its own
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        working-directory: ${{ steps.deps.outputs.dir }}
+        run: |
+          version=$(sed -nE 's/^set\(FMINUS_LLVM_VERSION "([^"]+)"\).*/\1/p' "$GITHUB_WORKSPACE/cmake/FMinusPins.cmake")
+          if ls install/llvm-"$version"-*/fminus-flavor.cmake >/dev/null 2>&1; then
+            echo "the cache restored has an LLVM $version:"; ls install; exit 0
+          fi
+          name="fminus-deps-llvm-${version}-${{ matrix.platform }}"
+          gh release download "deps-llvm-${version}" --pattern "$name.tar.gz" --pattern "$name.tar.gz.sha256"
+          if command -v sha256sum >/dev/null; then sha256sum -c "$name.tar.gz.sha256"; else shasum -a 256 -c "$name.tar.gz.sha256"; fi
+          tar -xzf "$name.tar.gz" -C install   # relative: Git Bash's tar takes D:\... for a remote host
+          rm "$name.tar.gz" "$name.tar.gz.sha256"
+          ls install
+
+      # LLVM's license, for the archive's notices, where a flavor's install lacks it (see the header).
+      - name: LLVM's license
+        working-directory: ${{ steps.deps.outputs.dir }}
+        run: |
+          printf '%s\n' 'include("${PINS}")' 'message("${FMINUS_LLVM_VERSION} ${FMINUS_LLVM_URL} ${FMINUS_LLVM_SHA256}")' \
+            > "$RUNNER_TEMP/pins.cmake"
+          read -r version url sha < <(cmake -DPINS="$GITHUB_WORKSPACE/cmake/FMinusPins.cmake" -P "$RUNNER_TEMP/pins.cmake" 2>&1 | tr -d '\r')
+          missing=()
+          for flavor in install/llvm-"$version"-*/; do
+            if [ -f "$flavor/fminus-flavor.cmake" ] && [ ! -f "$flavor/LICENSE.TXT" ]; then missing+=("$flavor"); fi
+          done
+          if [ ${#missing[@]} -eq 0 ]; then echo "every LLVM $version install has its LICENSE.TXT (or there is none yet)"; exit 0; fi
+          if [ -f "src/llvm-project-$version/llvm/LICENSE.TXT" ]; then echo "the deps cache has LLVM's source"; exit 0; fi
+          curl -fsSL --retry 3 -o llvm.tar.xz "$url"
+          if command -v sha256sum >/dev/null; then echo "$sha  llvm.tar.xz" | sha256sum -c; else echo "$sha  llvm.tar.xz" | shasum -a 256 -c; fi
+          cmake -E tar tf llvm.tar.xz | tr -d '\r' > members.txt
+          license=$(grep -x '[^/]*/llvm/LICENSE.TXT' members.txt)
+          [ -n "$license" ] || { echo "llvm-project's source has no llvm/LICENSE.TXT"; exit 1; }
+          cmake -E tar xf llvm.tar.xz "$license"
+          for flavor in "${missing[@]}"; do cp "$license" "$flavor"; echo "$flavor: LICENSE.TXT"; done
+          rm -rf llvm.tar.xz members.txt "${license%%/*}"
+
+      - name: Configure
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            export CC=clang CXX=clang++
+            cmake --preset release -DFMINUS_PARSER_TOOLS_MODE=system
+          else
+            cmake --preset release
+          fi
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test the install
+        run: ctest --preset release -R '^install$' --output-on-failure
+
+      # CPack through CMake's own package target: on Windows, `cpack` on PATH can be Chocolatey's.
+      - name: Pack
+        id: pack
+        run: |
+          cmake --build --preset release --target package
+          cd build-release
+          shopt -s nullglob
+          made=(fminus-*-*-*.tar.gz fminus-*-*-*.zip)
+          [ ${#made[@]} -eq 1 ] || { echo "cpack made ${#made[@]} archives: ${made[*]}"; ls -la; exit 1; }
+          archive="${made[0]}"
+          case "$archive" in *-${{ matrix.platform }}.*) ;; *) echo "$archive is not named for ${{ matrix.platform }}"; exit 1 ;; esac
+          if command -v sha256sum >/dev/null; then sha256sum "$archive"; else shasum -a 256 "$archive"; fi > "$archive.sha256"
+          ls -l "$archive"; cat "$archive.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "name=${archive%.tar.gz}" | sed 's/\.zip$//' >> "$GITHUB_OUTPUT"
+          archives="$(cygpath -m "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")/archives"
+          mkdir -p "$archives"
+          cp "$archive" "$archive.sha256" "$archives/"
+
+      # The archive as a user has it: unpacked somewhere new, with the build tree moved aside, so that nothing of it
+      # can be found.
+      - name: Smoke test of the unpacked archive
+        env:
+          ARCHIVE: ${{ steps.pack.outputs.archive }}
+          NAME: ${{ steps.pack.outputs.name }}
+        run: |
+          mv build-release build-release-aside
+          temp="$(cygpath -m "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")"
+          smoke="$temp/smoke"
+          mkdir -p "$smoke"
+          cd "$smoke"
+          cmake -E tar xf "$temp/archives/$ARCHIVE"
+          ls -R "$NAME"
+          fminus="$smoke/$NAME/bin/fminus"
+          "$fminus" --version > version.txt
+          cat version.txt
+          grep -q '^fminus version ' version.txt
+          "$fminus" --print-runtime > print.txt
+          cat print.txt
+          grep -q '^runtime-found: installed' print.txt
+          grep -q "^runtime: .*$NAME.lib.fminus" print.txt
+          [ "$("$fminus" "$GITHUB_WORKSPACE/examples/note/note.fm" --run main 69 | tr -d '\r')" = 440 ]
+          "$fminus" "$GITHUB_WORKSPACE/examples/note/note.fm" -o note 2> link.txt
+          cat link.txt
+          if [ "$RUNNER_OS" = Linux ] && [ -s link.txt ]; then echo "the link printed warnings"; exit 1; fi
+          [ "$(./note 69 | tr -d '\r')" = 440 ]
+          echo "the unpacked compiler made and ran an executable"
+          cd "$GITHUB_WORKSPACE"
+          mv build-release-aside build-release
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: |
+            ${{ runner.temp }}/archives/${{ steps.pack.outputs.archive }}
+            ${{ runner.temp }}/archives/${{ steps.pack.outputs.archive }}.sha256
+          retention-days: 7
+          compression-level: 0   # already compressed
+          if-no-files-found: error
+
+      # Kept whether or not the rest passed, once LLVM is whole in it: the next run then starts from it.
+      - name: Deps cache (is LLVM in it?)
+        id: built
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          if ls "${{ steps.deps.outputs.dir }}"/install/llvm-*/fminus-flavor.cmake >/dev/null 2>&1; then
+            echo "llvm=true" >> "$GITHUB_OUTPUT"
+          fi
+          ls "${{ steps.deps.outputs.dir }}/install" || true
+
+      - name: Deps cache (save)
+        if: always() && steps.built.outputs.llvm == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.deps.outputs.dir }}/install
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  release:
+    needs: build
+    if: inputs.release && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the draft release and its assets
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: fminus-*
+          merge-multiple: true
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l
+          shopt -s nullglob
+          files=(fminus-*.tar.gz fminus-*.zip)
+          [ ${#files[@]} -gt 0 ] || { echo "no archives"; exit 1; }
+          version=$(echo "${files[0]}" | sed -nE 's/^fminus-([0-9]+\.[0-9]+\.[0-9]+)-.*/\1/p')
+          [ -n "$version" ] || { echo "no version in ${files[0]}"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tag="$GITHUB_REF_NAME"; else tag="v$version"; fi
+          case "$tag" in *"$version"*) ;; *) echo "the tag $tag does not name the version $version"; exit 1 ;; esac
+          if gh release view "$tag" --json isDraft --jq .isDraft > draft.txt 2>/dev/null; then
+            [ "$(cat draft.txt)" = true ] || { echo "the release $tag is published already: it is not changed"; exit 1; }
+          else
+            notes="FMinus ${version}, prebuilt: unpack an archive anywhere and put its bin/ on PATH"
+            notes+=" (docs/building.md, \"Installing\"). Each archive has its SHA-256 beside it."
+            notes+=" Made by .github/workflows/release.yml from ${GITHUB_SHA}."
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "FMinus ${version}" --notes "$notes"
+          fi
+          gh release upload "$tag" "${files[@]}" fminus-*.sha256 --clobber
+          gh release view "$tag" --json assets --jq '.assets[] | "\(.name) \(.size)"'

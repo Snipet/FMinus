@@ -68,6 +68,10 @@ int main(int argc, char** argv)
     auto machine = fminus::hostTargetMachine(codegen[index]);
     if (!machine)
         return fail(machine.takeError());
+    // The machine code: written for the system's linker (support/HostTarget.h).
+    auto fileMachine = fminus::hostFileTargetMachine(codegen[index]);
+    if (!fileMachine)
+        return fail(fileMachine.takeError());
 
     llvm::LLVMContext context;
     llvm::SMDiagnostic diagnostic;
@@ -96,14 +100,14 @@ int main(int argc, char** argv)
             return llvm::Error::success();
         }
         if (emit == "asm")
-            return fminus::aot::emitFile(*module, **machine, output, fminus::aot::FileKind::Assembly);
+            return fminus::aot::emitFile(*module, **fileMachine, output, fminus::aot::FileKind::Assembly);
         if (emit == "obj")
-            return fminus::aot::emitFile(*module, **machine, output, fminus::aot::FileKind::Object);
+            return fminus::aot::emitFile(*module, **fileMachine, output, fminus::aot::FileKind::Object);
         fminus::aot::LinkOptions options;
         options.output = output;
         options.driverArgs = linkArgs;
         options.linkRuntime = !noRuntime;
-        return fminus::aot::emitExecutable(*module, **machine, std::move(options));
+        return fminus::aot::emitExecutable(*module, **fileMachine, std::move(options));
     }();
     if (result)
         return fail(std::move(result));

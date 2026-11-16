@@ -64,6 +64,22 @@ namespace fminus
         return builder->createTargetMachine();
     }
 
+    llvm::Expected<std::unique_ptr<llvm::TargetMachine>> hostFileTargetMachine(llvm::CodeGenOptLevel level)
+    {
+        initializeLLVM();
+        auto builder = llvm::orc::JITTargetMachineBuilder::detectHost();
+        if (!builder)
+            return builder.takeError();
+        builder->setCodeGenOptLevel(level);
+        // What LLJIT sets for JITLink (LLJIT.cpp, prepareForConstruction), on ELF only (HostTarget.h).
+        if (builder->getTargetTriple().isOSBinFormatELF())
+        {
+            builder->setCodeModel(llvm::CodeModel::Small);
+            builder->setRelocationModel(llvm::Reloc::PIC_);
+        }
+        return builder->createTargetMachine();
+    }
+
     llvm::CodeGenOptLevel codeGenLevel(llvm::OptimizationLevel level)
     {
         if (level == llvm::OptimizationLevel::O0)

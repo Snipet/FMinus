@@ -21,11 +21,12 @@
 #   pybind11      cmake/FMinusPython.cmake       the Python package only (FMINUS_BUILD_PYTHON)
 # Built dependencies are kept in the deps cache (FMINUS_DEPS_DIR, default .deps/), shared by every build tree.
 #
-# Layout (README.md): src/ is the fminus library: every .cpp under it is a source, and each Bison grammar there,
+# Layout (docs/architecture.md): src/ is the fminus library: every .cpp under it is a source, and each Bison grammar there,
 # with the Flex scanners beside it, is generated into the library. include/fminus/ is its public API. tools/<name>/
 # holds one executable each, examples/<name>/ one example each (a program and its harness). tests/ holds unit/
 # (Catch2), smoke/ (the toolchain's own checks) and lit/ (lit and FileCheck). Adding a file edits no CMake.
-# python/ is the Python package, `import fminus` (docs/python.md), built when FMINUS_BUILD_PYTHON is ON.
+# python/ is the Python package, `import fminus` (docs/python.md), built when FMINUS_BUILD_PYTHON is ON. packaging/
+# holds what `cmake --install` installs and `cpack` packs (docs/building.md, "Installing").
 #
 # Use the presets: `cmake --workflow --preset dev` configures, builds and tests (CMakePresets.json lists the others).
 
@@ -81,6 +82,15 @@ foreach(_feature JSON XML WEB WEB_SERVER FILES FILES_WRITE FILES_ANYWHERE)
 endforeach()
 configure_file(cmake/templates/Config.h.in "${PROJECT_BINARY_DIR}/include/fminus/Config.h" @ONLY)
 
+# Where `cmake --install` puts things (packaging/CMakeLists.txt; docs/building.md, "Installing"): GNU's directories,
+# the runtime's archives in their own, lib/fminus/, and the license and the dependencies' notices in share/doc/fminus/.
+# An installed fminus finds the archives from its own directory, by the relative path the build compiles into it
+# (src/CMakeLists.txt), so that a prefix can be moved or unpacked anywhere.
+include(GNUInstallDirs)
+set(FMINUS_INSTALL_RUNTIME_DIR "${CMAKE_INSTALL_LIBDIR}/fminus")
+set(FMINUS_INSTALL_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/fminus")
+file(RELATIVE_PATH FMINUS_INSTALL_RUNTIME_RELATIVE "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}/fminus")
+
 if(FMINUS_BUILD_TESTS)
   enable_testing()              # before the examples, which add their --check tests
 endif()
@@ -99,6 +109,9 @@ endif()
 if(FMINUS_BUILD_TESTS)
   include(FMinusTesting)
   add_subdirectory(tests)
+endif()
+if(FMINUS_BUILD_TOOLS)
+  add_subdirectory(packaging)   # the install rules and CPack's archive: the compiler, its runtime, their notices
 endif()
 
 if(FMINUS_BUILD_PYTHON)
