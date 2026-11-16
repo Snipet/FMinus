@@ -14,6 +14,10 @@ FetchContent_Declare(Catch2
   SYSTEM
   EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(Catch2)
+# Catch2's library as C++17 at least, which its own CMake leaves at C++14: it has StringMaker<std::string_view> and the
+# other conversions of C++17's types only then, and the tests (C++23) see them as there, so a comparison of two
+# string_views would not link. Clang's default is C++17 already; clang-cl's, on Windows, is C++14.
+target_compile_features(Catch2 PRIVATE cxx_std_17)
 list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
 
