@@ -28,16 +28,17 @@ Run it in the JIT, as any function:
 build-dev/bin/fminus examples/note/note.fm --run main 69     # prints 440
 ```
 
-Or build an executable and run that:
+Or build an executable and run that, as with a C compiler:
 
 ```bash
-build-dev/bin/fminus examples/note/note.fm --emit exe -o note
+build-dev/bin/fminus examples/note/note.fm -o note             # or --emit exe -o note
 ./note 69                                                    # 440
 ./note 60                                                    # 261.62555
 ./note                                                       # ./note: 'main' takes 1 argument, not 0  (status 2)
 ./note C4                                                    # ./note: 'C4' is not a number             (status 2)
 ```
 
+An installed `fminus` ([building.md](building.md), "Installing") does the same from anywhere: `fminus note.fm -o note`.
 On Windows, `-o note` writes `note.exe` (clang-cl, the linking driver there, adds the extension), and `note 69` runs it.
 
 ## `main`
@@ -89,23 +90,46 @@ them ("Where to go next").
 
 | Problem | Message |
 |---|---|
-| `--emit exe` and no `main` (or only a prototype) | fminus: an executable needs a main function, such as float main(float x) |
+| an executable (`-o prog`, `--emit exe`) and no `main` (or only a prototype) | fminus: an executable needs a main function, such as float main(float x) |
 | a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` | fminus: 'main' must return float, double or bool and take only float and double parameters |
 | `--run` of a function with a `float4` parameter | fminus: --run: 'f' takes a parameter of type 'float4'; --run passes bools, ints, floats, doubles and arrays of ints, floats and doubles only |
 | `--run f 1.5` of `float f(int n)` | fminus: --run: '1.5' is not an int |
 | `--emit exe` without `-o` | fminus: --emit exe: an executable needs a file name (-o) |
+| no C++ toolchain where `fminus` looks | fminus: linkExecutable: no C++ compiler to link with: tried /usr/bin/clang++ (the compiler FMinus was built with), c++ (on PATH), clang++ (on PATH). ... |
 
 ## The commands
 
+`fminus`'s command line is a C compiler's where the two meet (`tools/fminus/main.cpp` has all of it):
+
+| Command | What it writes |
+|---|---|
+| `fminus prog.fm` | the optimised IR on stdout, as it always has |
+| `fminus prog.fm -o prog` | an executable that runs `main`: with no `--emit`, `-c`, `-S` or `-emit-llvm`, `-o`'s name says what to write |
+| `fminus prog.fm -o prog.ll` (`.bc`, `.s` or `.asm`, `.o` or `.obj`) | LLVM IR, bitcode, assembly or an object file, by the extension, in any case |
+| `fminus pedal.cir -o pedal.fm` | the FMinus module a circuit netlist generates (`--emit fm`; [circuits.md](circuits.md)) |
+| `fminus prog.fm -o /dev/null` | the IR: a device or a pipe gets what it got before |
+| `fminus -c prog.fm` | an object file, `prog.o` in the current directory (clang's `-c`; with `-o`, that file) |
+| `fminus -S prog.fm` | this machine's assembly, `prog.s` |
+| `fminus -S -emit-llvm prog.fm` | LLVM IR, `prog.ll` (`-c -emit-llvm`: bitcode, `prog.bc`; `-emit-llvm` alone: the IR on stdout) |
+| `fminus prog.fm --emit ast` | the syntax tree (`--emit ll`, `bc`, `asm`, `obj`, `exe`, `fm`, whatever `-o`'s name; on stdout without `-o`, but `exe`) |
+| `fminus prog.fm --run main 3 4` | nothing: the JIT calls `main` and prints its result |
+| `fminus --version` | FMinus's version, its LLVM's, the target, the build's features (`+json +xml -web ...`) and where it is |
+| `fminus --print-runtime` | what an executable is linked with, and through ([building.md](building.md), "Installing") |
+
+Two of `--emit`, `-c`, `-S` and `-emit-llvm` that ask for different outputs are an error (`fminus: -c and -S ask for
+different outputs (an object file, assembly)`), and so is a `.fm` name for what is not a netlist. Before `-o` read its
+name, `fminus prog.fm -o prog` wrote the IR to `prog`; a script that relied on that names the file `.ll` or passes
+`--emit ll`.
+
 ```bash
-build-dev/bin/fminus prog.fm --emit exe -o prog         # an executable, at -O2
-build-dev/bin/fminus prog.fm --emit exe -O0 -o prog     # unoptimised, for the debugger
+build-dev/bin/fminus prog.fm -o prog                    # an executable, at -O2 (--emit exe -o prog: the same)
+build-dev/bin/fminus prog.fm -O0 -o prog                # unoptimised, for the debugger
 build-dev/bin/fminus prog.fm --entry                    # the IR, with the entry the executable would get
 build-dev/bin/fminus prog.fm --entry --emit asm -o -    # its assembly
-build-dev/bin/fminus prog.fm --entry --emit obj -o prog.o
+build-dev/bin/fminus prog.fm --entry -c -o prog.o       # its object (--entry --emit obj -o prog.o)
 build-dev/bin/fminus prog.fm --run main 3 4             # no executable: the JIT calls main
-build-dev/bin/fminus prog.fm --emit exe --loop-budget 1000000 -o prog   # main may take a million branches back
-build-dev/bin/fminus prog.fm --emit exe --bounds-check -o prog          # main's arrays' indexes checked
+build-dev/bin/fminus prog.fm --loop-budget 1000000 -o prog   # main may take a million branches back
+build-dev/bin/fminus prog.fm --bounds-check -o prog          # main's arrays' indexes checked
 ```
 
 With `--loop-budget n` the program counts its loops against a budget (extending.md, recipe 29), and the entry sets it
@@ -118,8 +142,9 @@ recipe 30): when one fails, `main` returns early, before the access, and the exe
 printing a result.
 
 `--entry` adds the entry point to whatever `--emit` writes, so an object file can be linked by hand
-(`c++ prog.o build-dev/lib/libfminus_runtime.a -o prog`; on Windows,
-`clang-cl prog.o build-dev\lib\fminus_runtime.lib`). `--emit exe` always adds it.
+(`c++ prog.o build-dev/lib/libfminus_runtime.a -o prog`, or with an installed `fminus`'s runtime,
+``c++ prog.o "$(fminus --print-runtime | sed -n 's/^runtime: //p')" -o prog``; on Windows,
+`clang-cl prog.o build-dev\lib\fminus_runtime.lib`). An executable always has it.
 
 ## How an executable gets its entry
 
@@ -253,8 +278,13 @@ run:
 }
 ```
 
-Then `aot::emitExecutable` writes the object to a temporary file and links it with the compiler driver the build tree
-was configured with, against `libfminus_runtime.a` (and, in the `asan` and `tsan` presets, the sanitizer runtimes).
+Then `aot::emitExecutable` writes the object to a temporary file and links it through a C++ compiler driver against
+`libfminus_runtime.a` (and, in the `asan` and `tsan` presets, the sanitizer runtimes): `aot::findToolchain` finds both,
+the runtime beside an installed `fminus` (`../lib/fminus`) or in a build tree's own tree, and the driver from
+`FMINUS_LINK_DRIVER`, the compiler FMinus was built with, or the system's `c++` or `clang++` (`clang-cl` on Windows),
+as `fminus --print-runtime` prints ([building.md](building.md), "Installing"). The object is the system linker's to
+take as it is: on Linux it is position-independent, in the small code model, the code the JIT generates there
+(`support/HostTarget.h`, `hostFileTargetMachine`), so an executable links with no text relocations and no warning.
 That is the same path `fminus-build` takes for hand-written IR; "Executables, in detail" (below) has the details.
 
 In the `-O2` listing, `expf` is the default math mode's ([language.md](language.md) has the modes): FMinus's own
@@ -303,6 +333,13 @@ inlined into `main` and there is nothing to break on but `main` itself. Source-l
   number, a `main` with no parameters (from stdin), a program with no `main`, `--emit exe` without `-o`, the IR of
   `--entry`, and `examples/note/note.fm`, built and run. The same `main` also runs through `--run`, with the same
   output.
+- `tests/lit/fminus/command-line.fm` checks the command line: each of `-o`'s extensions, any other name an executable,
+  run; `-c`, `-S` and `-emit-llvm`, and the files they name after the input; `/dev/null`; the options that disagree;
+  `--version`; `--print-runtime`, and the errors when `FMINUS_RUNTIME_DIR` or `FMINUS_LINK_DRIVER` names nothing; and,
+  on Linux, that an executable links with no warning from the system's linker.
+- The ctest test `install` (`tests/install/InstallTest.cmake`) installs the build, moves the prefix, and runs the
+  installed `fminus` from there: `--version`, `--print-runtime` (it must name the moved install's runtime, not the
+  build tree's), `--run`, and `note.fm -o note`, run; with the web library, an executable that calls it too.
 - `tests/unit/AotTest.cpp` checks the IR `addEntryPoint` leaves (an internal `fminus.main`, an external
   `i32 main(i32, ptr)`, the two runtime declarations) and what it refuses: no `main`, a prototype only, an `i1`
   result, a vector parameter, a variadic `main`.

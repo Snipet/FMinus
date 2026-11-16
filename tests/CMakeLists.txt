@@ -14,6 +14,8 @@
 # whole name, reaches Catch2 as the TEST_CASE spells it, "§" and all (the console's code page would garble it, and the
 # test would match nothing and fail).
 #
+# install/ tests the install (packaging/CMakeLists.txt): InstallTest.cmake, a CMake script, the test "install".
+#
 # lit: every *.test, *.fm and *.ll under lit/, through bin/fminus-lit, a lit wrapper that maps the source tree to this
 # build tree. FMinus's tools, FileCheck, not, count and LLVM's tools are on PATH. ctest runs the suite as one test
 # ("lit"); `bin/fminus-lit -v ../tests/lit/smoke` runs part of it by hand.
@@ -45,6 +47,26 @@ if(WIN32)
   # Merged into each executable's manifest by the link step (CMake's MSVC rules, which clang-cl takes too).
   target_sources(fminus-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/utf8.manifest")
   target_sources(fminus-library-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/utf8.manifest")
+endif()
+
+# ---- the install ----------------------------------------------------------------------------------------------------
+# install/InstallTest.cmake, the ctest test "install": installs the build (packaging/CMakeLists.txt) into install-test/
+# beside this file's build directory, moves the prefix, and runs the installed fminus from there (--version,
+# --print-runtime, --run, an executable made and run).
+if(TARGET fminus)
+  add_test(NAME install COMMAND "${CMAKE_COMMAND}"
+    "-DFMINUS_BUILD_DIR=${PROJECT_BINARY_DIR}"
+    "-DFMINUS_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/install-test"
+    "-DFMINUS_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+    "-DFMINUS_VERSION=${PROJECT_VERSION}"
+    "-DFMINUS_CONFIG=$<CONFIG>"
+    "-DFMINUS_BIN_DIR=${CMAKE_INSTALL_BINDIR}"
+    "-DFMINUS_RUNTIME_DIR_REL=${FMINUS_INSTALL_RUNTIME_DIR}"
+    "-DFMINUS_DOC_DIR=${FMINUS_INSTALL_DOC_DIR}"
+    "-DFMINUS_RUNTIME_NAME=$<TARGET_FILE_NAME:fminus_runtime>"
+    "-DFMINUS_EXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+    "-DFMINUS_WEB=${FMINUS_HAS_WEB}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/install/InstallTest.cmake")
 endif()
 
 # ---- lit ------------------------------------------------------------------------------------------------------------

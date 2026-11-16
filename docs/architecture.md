@@ -613,7 +613,13 @@ C keeps the enumerated type, and `lowerSwitch` reads it for clang's `-Wswitch`, 
 - **`hostTargetMachine(level)`** returns a `TargetMachine` for this CPU and its features
   (`JITTargetMachineBuilder::detectHost`). On Apple silicon, that means a CPU model such as `apple-m5`, whose features
   the model implies; `fminus-hostinfo --features` lists them. It also registers the host target the first time
-  (`support/LLVMInit.h`).
+  (`support/LLVMInit.h`). It has the target's defaults for a JIT, and the pipeline runs with it, the JIT's and
+  `fminus`'s alike.
+- **`hostFileTargetMachine(level)`** is the machine that writes an object or assembly file (below, "Ahead of time"):
+  on an ELF system (Linux) the same, but small and position-independent, the code model and relocation model LLJIT
+  gives JITLink there, so that the file holds the JIT's own code and the system's linker takes it into an executable
+  (a PIE) with no text relocations (the target's JIT defaults there, the large code model and static relocations, put
+  relocations in an object's text: `.ltext`). On macOS and Windows it is `hostTargetMachine`'s.
 - **`prepareModule(module, machine)`** sets the module's triple and data layout. Do it before optimising: the passes
   read both.
 - **`optimiseModule(module, machine, level)`** runs `PassBuilder::buildPerModuleDefaultPipeline(level)`, which is
@@ -737,13 +743,20 @@ and in the fast mode, on Apple systems, a `float4`'s `llvm.sin.v4f32` a call of 
 
 ## Ahead of time: `support/Aot.h`
 
-The same module can be written to disk instead, for development:
+The same module can be written to disk instead: what `fminus prog.fm -o prog`, `-c` and `-S` do, in a build tree and
+installed ([building.md](building.md), "Installing").
 
 - **`emitFile(module, machine, path, Object | Assembly)`** runs the code generator (still the legacy pass manager's
-  `addPassesToEmitFile`). The path `-` means stdout. Object writers seek, so a non-seekable stream is buffered.
-- **`linkExecutable(options)`** runs the C++ compiler driver the build tree was configured with (`$FMINUS_LINK_DRIVER`
-  overrides it), with the objects, this tree's `libfminus_runtime.a` and, under `asan` or `tsan`, the sanitizer
-  runtimes.
+  `addPassesToEmitFile`), with the machine `hostFileTargetMachine` makes (above). The path `-` means stdout. Object
+  writers seek, so a non-seekable stream is buffered.
+- **`findToolchain()`** finds what an executable is linked with and through, as `fminus --print-runtime` prints it:
+  the runtime's archives in `$FMINUS_RUNTIME_DIR`, else beside the running executable as an install lays them out
+  (`../lib/fminus`, the relative path compiled in: `FMINUS_INSTALL_RUNTIME_RELATIVE`), else in the build tree it was
+  built in; and the C++ compiler driver `$FMINUS_LINK_DRIVER` names, else the one the build was configured with if it is
+  there, else `c++` or `clang++` on `PATH` (`clang-cl` on Windows).
+- **`linkExecutable(options)`** runs that driver with the objects, the runtime's archive, the web library's archives
+  when the module calls it, and, under `asan` or `tsan`, the sanitizer runtimes; it fails, naming where it looked, when
+  either is missing.
 - **`emitExecutable(module, machine, options)`** combines the two through a temporary object file.
 - **`addEntryPoint(module)`** makes a program's `float main(float, ...)` or `bool main(float, ...)` the executable's
   entry. C's entry is `int main(int, char**)`, so it renames the program's `main` to `fminus.main` (internal, so the
@@ -757,8 +770,9 @@ The same module can be written to disk instead, for development:
   runs before `prepareModule` and `optimiseModule`, so the entry is optimised with the rest. [programs.md](programs.md)
   shows the IR.
 
-The `fminus` driver emits objects, assembly and executables (`--emit exe`, which adds the entry; `--entry` adds it to
-the other outputs). `fminus-build` takes hand-written LLVM IR, which brings its own `main`, to an executable.
+The `fminus` driver emits objects, assembly and executables (`-o prog` or `--emit exe`, which adds the entry;
+`--entry` adds it to the other outputs). `fminus-build` takes hand-written LLVM IR, which brings its own `main`, to an
+executable.
 
 ## The runtime: `src/runtime/`
 
@@ -845,7 +859,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 
 | Target | Source | Uses |
 |---|---|---|
-| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/asm/obj/exe` or `--run` in the JIT (through a thunk of the function's signature, `jit/Call.h`); a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it; `--self-test` runs `fminus::circuit::selfTest` first, on `--threads` threads); FMinus's messages on that text are re-cited at the netlist's lines |
+| `fminus` | `tools/fminus/main.cpp` | parse, lower, then `--emit ast/ll/bc/asm/obj/exe` (or what `-o`'s name, `-c`, `-S` and `-emit-llvm` ask for, as a C compiler reads them) or `--run` in the JIT (through a thunk of the function's signature, `jit/Call.h`); `--version`, and `--print-runtime` (`aot::findToolchain`); a `.cir` input, or an `#include` of one, is the text `fminus::circuit::generate` writes (`--emit fm` prints it; `--self-test` runs `fminus::circuit::selfTest` first, on `--threads` threads); FMinus's messages on that text are re-cited at the netlist's lines |
 | `fminus-build` | `tools/fminus-build/main.cpp` | LLVM IR to exe/obj/asm/ll (HostTarget + Aot) |
 | `fminus-hostinfo` | `tools/fminus-hostinfo/main.cpp` | the triple, CPU, features and data layout the JIT targets |
 | `example-biquad` | `examples/biquad/bench.cpp` | biquad.fm's module, its cutoff a stream, against C++, compared and timed, through `fminus::Program` |
@@ -865,6 +879,7 @@ Because the JIT and executables share one runtime, the two compile the same prog
 | `fminus-tests` | `tests/unit/`, `tests/smoke/` | Catch2 |
 | `fminus-library-tests` | `tests/library/` | Catch2, in C++17, against `FMinus::FMinus` alone: the public API as a host uses it |
 | lit suite | `tests/lit/` | `fminus`, `fminus-build`, FileCheck, LLVM's tools |
+| ctest `install` | `tests/install/InstallTest.cmake` | the build installed (`packaging/CMakeLists.txt`), the prefix moved, and the installed `fminus` run from there |
 
 ## Libraries and include roots
 

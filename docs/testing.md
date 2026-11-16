@@ -11,6 +11,7 @@ The layers of tests, how to write each, and how to look at what the compiler did
 | smoke (Catch2) | `tests/smoke/` | the toolchain itself: LLJIT and O3 on the host, an AOT executable, Bison and Flex (the calculator) | rarely: they guard the integration |
 | lit + FileCheck | `tests/lit/**` | the tools end to end: `fminus` IR, assembly, runs and errors; `fminus-build`; LLVM's tools | you change output a tool prints |
 | examples | `examples/<name>/` (`--check`); `tests/lit/fminus/examples.test` | a real kernel against C++, bit for bit or within a tolerance; the `.fm` examples' results | you change what a kernel or an example computes, or how fast |
+| install | `tests/install/InstallTest.cmake` (the ctest test `install`) | the build installed into a directory of its own, the prefix moved, and the installed `fminus` run from there: `--version`, `--print-runtime` (the moved install's runtime, not the build tree's), `--run`, an executable made and run | you change what is installed (`packaging/CMakeLists.txt`) or how `fminus` finds it (`support/Aot.h`) |
 
 ```bash
 cmake --build --preset dev --target check-fminus   # build what the tests need, then ctest

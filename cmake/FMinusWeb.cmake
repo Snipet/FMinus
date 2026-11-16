@@ -21,10 +21,12 @@
 # Threads, the system libraries) and, with Mbed TLS, fminus_web_mbedtls (its three libraries and its headers, which
 # this tree's web tests also use, for a certificate authority and a TLS server of their own), FMINUS_WEB_TLS
 # (schannel or mbedtls), and FMINUS_WEB_LINK: what an executable that calls the web library links after
-# libfminus_web.a (support/Aot.cpp), libcurl's and Mbed TLS's archives in link order and then the system libraries
-# libcurl's own CMake links on that platform (its CURL_LIBS: pthreads on Linux; SystemConfiguration, CoreFoundation and
+# libfminus_web.a (support/Aot.cpp), libcurl's and Mbed TLS's archives in link order (FMINUS_WEB_ARCHIVES, which an
+# install puts beside the runtime: packaging/CMakeLists.txt) and then the system libraries libcurl's own CMake links on
+# that platform (FMINUS_WEB_SYSTEM_LIBRARIES, its CURL_LIBS: pthreads on Linux; SystemConfiguration, CoreFoundation and
 # CoreServices on macOS, with Security for web/RootsMac.cpp; ws2_32, iphlpapi, bcrypt, advapi32, crypt32 and secur32
-# on Windows).
+# on Windows). And the sources' directories, for their notices: FMINUS_CURL_SOURCE_DIR, FMINUS_MBEDTLS_SOURCE_DIR (with
+# Mbed TLS).
 if(NOT FMINUS_WEB)
   return()
 endif()
@@ -205,19 +207,24 @@ function(_fminus_web_archive target out)
   set(${out} "${_file}" PARENT_SCOPE)
 endfunction()
 _fminus_web_archive(CURL::libcurl_static _fminus_curl_archive)
-set(FMINUS_WEB_LINK "${_fminus_curl_archive}")
+set(FMINUS_WEB_ARCHIVES "${_fminus_curl_archive}")
 if(FMINUS_WEB_TLS STREQUAL "mbedtls")
   foreach(_lib MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::tfpsacrypto)
     _fminus_web_archive(${_lib} _archive)
-    list(APPEND FMINUS_WEB_LINK "${_archive}")
+    list(APPEND FMINUS_WEB_ARCHIVES "${_archive}")
   endforeach()
 endif()
 if(WIN32)
-  list(APPEND FMINUS_WEB_LINK ws2_32.lib iphlpapi.lib bcrypt.lib advapi32.lib crypt32.lib secur32.lib)
+  set(FMINUS_WEB_SYSTEM_LIBRARIES ws2_32.lib iphlpapi.lib bcrypt.lib advapi32.lib crypt32.lib secur32.lib)
 elseif(APPLE)
-  list(APPEND FMINUS_WEB_LINK -framework SystemConfiguration -framework CoreFoundation -framework CoreServices
-                              -framework Security)
+  set(FMINUS_WEB_SYSTEM_LIBRARIES -framework SystemConfiguration -framework CoreFoundation -framework CoreServices
+                                  -framework Security)
 else()
-  list(APPEND FMINUS_WEB_LINK -pthread)
+  set(FMINUS_WEB_SYSTEM_LIBRARIES -pthread)
+endif()
+set(FMINUS_WEB_LINK ${FMINUS_WEB_ARCHIVES} ${FMINUS_WEB_SYSTEM_LIBRARIES})
+set(FMINUS_CURL_SOURCE_DIR "${_fminus_curl_src}")
+if(FMINUS_WEB_TLS STREQUAL "mbedtls")
+  set(FMINUS_MBEDTLS_SOURCE_DIR "${_fminus_mbedtls_src}")
 endif()
 message(STATUS "FMinus: the web library: libcurl ${FMINUS_CURL_VERSION} with ${FMINUS_WEB_TLS} (${_fminus_curl_prefix})")

@@ -1,8 +1,8 @@
 # Building
 
-FMinus's build: presets, the dependency cache, LLVM flavors, and how to add sources, tools, examples, tests and
-dependencies. The build itself is `CMakeLists.txt` and `cmake/FMinus*.cmake`; each module's header comment documents
-its options.
+FMinus's build: presets, installing it as a compiler, the dependency cache, LLVM flavors, and how to add sources,
+tools, examples, tests and dependencies. The build itself is `CMakeLists.txt` and `cmake/FMinus*.cmake`, and the install
+`packaging/CMakeLists.txt`; each module's header comment documents its options.
 
 ## Requirements
 
@@ -51,6 +51,129 @@ Each preset builds in `build-<preset>/`, exports `compile_commands.json` (`.clan
 workflow, except `xcode`: run `cmake --preset xcode`, then `open build-xcode/FMinus.xcodeproj`. Sanitizers
 instrument FMinus's own code only; LLVM stays uninstrumented, which is why the `asan` test preset sets
 `detect_container_overflow=0`.
+
+## Installing
+
+An installed FMinus is a compiler like any other: `fminus` on `PATH`, which runs a program in the JIT (`fminus prog.fm
+--run main 69`) or compiles it as a C compiler does (`fminus prog.fm -o prog`, `-c`, `-S`; [programs.md](programs.md),
+"The commands"), with the runtime it links into every executable it makes beside it.
+
+### From source
+
+```bash
+cmake --workflow --preset release                  # configure, build, test (a first configure builds LLVM: 10-30 minutes)
+cmake --install build-release --prefix ~/.local    # yours alone; or `sudo cmake --install build-release` for /usr/local
+export PATH="$HOME/.local/bin:$PATH"               # if it is not on PATH already (in ~/.bashrc or ~/.zshrc)
+fminus --version
+```
+
+Without `--prefix` the install goes to CMake's default prefix, `/usr/local` (`C:/Program Files/FMinus` on Windows),
+which needs `sudo` (on Windows, an administrator's prompt). The prefix given to `cmake --install` need not be the one
+configured: everything in an install is found relative to `bin/fminus`. On Windows, install from the developer prompt
+to a prefix of your own, `cmake --install build-release --prefix %LOCALAPPDATA%\Programs\FMinus`, and add its `bin` to
+`Path` (Settings, "Edit environment variables for your account").
+
+`release` is the preset to install: Release, LLVM without assertions. Any build tree installs, with the features it
+was configured with: `cmake --preset release -DFMINUS_WEB=ON -DFMINUS_WEB_SERVER=ON` and then the build and the install
+give a compiler with the web library, whose archives, and libcurl's and Mbed TLS's, are installed beside the runtime's.
+
+### What it installs
+
+The layout is GNU's on every system (`GNUInstallDirs`), and `packaging/CMakeLists.txt` holds every install rule, each
+in a component a package can choose (`cmake --install build-release --component runtime`):
+
+| Path | Component | What |
+|---|---|---|
+| `bin/fminus` (`fminus.exe`) | `compiler` | the driver, LLVM linked in: it needs no LLVM, and no FMinus library, to run |
+| `lib/fminus/libfminus_runtime.a` (`fminus_runtime.lib`) | `runtime` | what `fminus` links into every executable it makes (`src/runtime/`, with PFFFT, yyjson and pugixml in it); in a build with the web library, also `libfminus_web.a` and libcurl's and Mbed TLS's archives (`libcurl.a`, `libmbedtls.a`, `libmbedx509.a`, `libtfpsacrypto.a`), which an executable that calls it links. A directory of FMinus's own, as compilers keep theirs (`lib/gcc/`, `lib/clang/`), so that nothing of it lands among the system's libraries |
+| `share/doc/fminus/LICENSE`, `NOTICES.txt`, `third-party/<name>/` | `licenses` | FMinus's license (GPL-3.0); what each dependency is, its license and which installed file holds its code; and each dependency's own license file, from its source in the deps cache (LLVM's, CLI11's, PFFFT's, yyjson's, pugixml's, fast_float's; with the web library libcurl's, Mbed TLS's and llhttp's). A package of the compiler or the runtime carries them: README.md's "License" says what each asks of a binary that holds its code, and every executable `fminus` makes holds the runtime's |
+| `bin/fminus-build`, `bin/fminus-hostinfo` | `devtools` | only when named (`--component devtools`): tools for FMinus's own development, hand-written IR to an executable, and what the JIT targets, of which `fminus --version` says what a user needs |
+
+Nothing for embedding FMinus in a C++ host is installed (`include/fminus/`, `libfminus.a`): a host builds FMinus as a
+part of its own build, as `examples/plugin/` does ([below](#the-plugin-example)). The Python package installs with pip
+([python.md](python.md)), not here.
+
+### Where `fminus` finds what it links with
+
+An installed `fminus` finds the runtime's archives relative to its own executable, `../lib/fminus` from its `bin/`
+(the relative path is compiled in at configure time), so a prefix can be moved or unpacked anywhere, and a link to
+`bin/fminus` elsewhere on `PATH` finds them (on Linux and macOS, where the system names an executable by its real
+path). A build tree's `fminus` finds its own tree's archives, as before. In order:
+
+1. `FMINUS_RUNTIME_DIR`, when it is set: that directory, laid out as an install's `lib/fminus/` is, and nothing else.
+2. `../lib/fminus` beside the running executable: an install.
+3. The build tree it was built in (`lib/libfminus_runtime.a`, and with the web library the deps cache's libcurl and
+   Mbed TLS), if that is still there.
+
+It links through a C++ compiler's driver, which brings the C and C++ libraries and the system's linker:
+`FMINUS_LINK_DRIVER`, when it is set (and nothing else); else the compiler the build was configured with
+(`CMAKE_CXX_COMPILER`), if that path exists on this machine; else the system's, by name on `PATH`: `c++`, then
+`clang++` (on Windows, `clang-cl`). `fminus --print-runtime` says what it would use, and how it found each:
+
+```
+$ fminus --print-runtime
+runtime: /home/me/.local/lib/fminus/libfminus_runtime.a
+runtime-found: installed: ../lib/fminus from the executable's directory
+driver: /usr/bin/clang++
+driver-found: the compiler FMinus was built with
+```
+
+In a build with the web library a `web:` line lists its archives and the system libraries they need. It exits with 1
+when it finds no runtime or no driver, and an executable's link then fails with what it tried (Troubleshooting,
+[below](#troubleshooting)).
+
+### What an installed compiler needs
+
+- **To run a program in the JIT** (`--run`), or to write IR, assembly or an object: nothing. `fminus` holds LLVM. On
+  Linux it needs a C library and a C++ library at least as new as the ones it was built against.
+- **To make an executable** (`fminus prog.fm -o prog`): a C++ toolchain, whose driver links. On Linux, clang or GCC
+  (`sudo apt install clang`, or `g++`); on macOS, Xcode's command line tools (`xcode-select --install`); on Windows,
+  Visual Studio's "C++ Clang tools for Windows", with `fminus` run from its developer prompt ("x64 Native Tools Command
+  Prompt for VS"), whose `LIB` names the C runtime's libraries. The runtime's archive is compiled C++, so its C++
+  library must be at least as new as the one it was built with.
+- **The executables it makes** need only the system's libraries: the C library, libm, and the C++ library (on Windows,
+  the C runtime).
+
+### From a prebuilt archive
+
+The Release workflow (`.github/workflows/release.yml`, run by hand) packs an install for Linux on x64, macOS on Apple
+silicon and Windows on x64: `fminus-<version>-<os>-<arch>.tar.gz` (`.zip` on Windows), holding `bin/`, `lib/fminus/`
+and `share/doc/fminus/` under a directory of that name, each beside its SHA-256. Unpack it anywhere and put its `bin`
+on `PATH`:
+
+```bash
+mkdir -p ~/.local/opt
+tar -xzf fminus-0.1.0-linux-x64.tar.gz -C ~/.local/opt         # anywhere: nothing in it names where it is
+export PATH="$HOME/.local/opt/fminus-0.1.0-linux-x64/bin:$PATH"
+fminus --version
+```
+
+- **Linux**: built on Ubuntu 24.04, it needs a C library and a C++ library as new as the ones it was linked against
+  there: the same build on Ubuntu 24.04 asks for glibc 2.38 and GCC 13's libstdc++ (`GLIBCXX_3.4.32`), so Ubuntu 24.04,
+  Debian 13, Fedora 39 and later run it. On an older system, build from source.
+- **macOS**: macOS 14 or later, on Apple silicon. The archive is not notarised: one a browser downloaded is
+  quarantined, and `xattr -dr com.apple.quarantine fminus-0.1.0-macos-arm64` lets it run.
+- **Windows**: x64; making an executable needs Visual Studio's C++ Clang tools and its developer prompt, as above.
+
+The archives leave out the web library: its macOS and Windows code has never been built or run, and it would bring
+libcurl and Mbed TLS into every archive. Build from source with `-DFMINUS_WEB=ON` for it.
+
+`cmake --build build-release --target package` packs this tree's install the same way, with CPack (part of CMake):
+the default components, `compiler`, `runtime` and `licenses`, into `build-release/fminus-<version>-<os>-<arch>.tar.gz`
+(`.zip` on Windows).
+
+### Uninstalling
+
+`cmake --install` lists every file it installed, one a line, in `install_manifest.txt` in the build tree. Remove them
+(with `sudo xargs` for `/usr/local`), and then the directories they leave empty:
+
+```bash
+tr '\n' '\0' < build-release/install_manifest.txt | xargs -0 rm --
+rmdir ~/.local/lib/fminus ~/.local/share/doc/fminus/third-party/* ~/.local/share/doc/fminus/third-party ~/.local/share/doc/fminus
+```
+
+On Windows, in PowerShell: `Get-Content build-release\install_manifest.txt | Remove-Item`. A prefix of FMinus's own,
+an unpacked archive among them, goes with its directory.
 
 ## What programs' builtins a build has
 
@@ -168,7 +291,8 @@ environment variable), shared by every build tree of the checkout:
   build/mbedtls-<version>-<flavor>/  install/mbedtls-<version>-<flavor>/    Mbed TLS, static (FMINUS_WEB)
   src/llhttp-<version>/        llhttp's source, of which fminus_web compiles three files (FMINUS_WEB_SERVER)
   build/<flavor>/              LLVM's build tree: about 1 GB, safe to delete once installed
-  install/<flavor>/            LLVM: headers, static libraries, CMake package, tools, lit
+  install/<flavor>/            LLVM: headers, static libraries, CMake package, tools, lit, and its LICENSE.TXT (which
+                               an install of fminus carries; a flavor built before held none)
   install/bison-3.8.2/  install/flex-2.6.4/
   src/winflexbison-2.5.25-a243a1c/  install/winflexbison-2.5.25-a243a1c/     Windows, in place of Bison and Flex
 ```
@@ -389,12 +513,15 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
   `_CRT_NONSTDC_NO_WARNINGS` turn off the C runtime's deprecations of standard functions such as `getenv` and of
   POSIX names such as `fileno`. The examples' `-ffp-contract=off` goes through clang-cl as
   `/clang:-ffp-contract=off`.
-- **File names.** The library is `lib/libfminus.lib`, and the runtime `lib/fminus_runtime.lib`. `lib/fminus.lib` is
-  the driver's import library: LLVM's JIT exports two symbols for debuggers (`__jit_debug_descriptor`,
-  `__jit_debug_register_code`), so the linker writes one for every executable that links it, beside the libraries.
+- **File names.** The library is `lib/libfminus.lib`, and the runtime `lib/fminus_runtime.lib` (in an install,
+  `lib/fminus/fminus_runtime.lib`). `lib/fminus.lib` is the driver's import library: LLVM's JIT exports two symbols for
+  debuggers (`__jit_debug_descriptor`, `__jit_debug_register_code`), so the linker writes one for every executable
+  that links it, beside the libraries. It is not installed.
 - **Sanitizers** are not set up for clang-cl: `FMINUS_SANITIZERS` is an error.
-- **Executables.** `fminus --emit exe` and `fminus-build` link through clang-cl, which adds `.exe` to a name without
-  an extension (`-o note` writes `note.exe`) and needs the developer prompt's `LIB` to find the C runtime. The Windows
+- **Executables.** `fminus prog.fm -o prog` (and `--emit exe`) and `fminus-build` link through clang-cl (the build's,
+  or an installed `fminus`'s `clang-cl` on `PATH`: [Installing](#installing)), which adds `.exe` to a name without an
+  extension (`-o note` writes `note.exe`) and needs the developer prompt's `LIB` to find the C runtime. The object
+  `fminus` writes for it is the JIT's code there, in the large code model. The Windows
   C runtime defines `printf` inline in `<stdio.h>`, so IR that calls it needs
   `--link-arg=legacy_stdio_definitions.lib` (`tests/lit/smoke/build-exe.ll`).
 - **The heap.** The Windows C runtime has no `aligned_alloc`. FMinus's `malloc` and `calloc` come from
@@ -430,6 +557,10 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
 | Windows: `FMinus: ... is MSVC's cl; FMinus builds with clang` | install Visual Studio's "C++ Clang tools for Windows", and configure a fresh build tree (delete `build-<preset>/`) from a developer prompt |
 | Windows: `WinFlexBison ...: build failed` | the log it names has the compiler's error; WinFlexBison builds with this tree's C compiler, so the same prompt and clang-cl |
 | Windows: `LNK2038: mismatch detected for 'RuntimeLibrary'` | something asked for the debug C runtime (`/MDd`); FMinus and LLVM use the release one, `/MD`, in every configuration ([Windows](#windows)) |
+| `fminus: linkExecutable: no C++ compiler to link with: tried ...` | the machine has no C++ toolchain, or not where `fminus` looks ([Installing](#where-fminus-finds-what-it-links-with)): install one (clang or GCC; Xcode's command line tools; Visual Studio's C++ Clang tools), or name its driver in `FMINUS_LINK_DRIVER` |
+| `fminus: linkExecutable: cannot find the FMinus runtime: no .../lib/fminus/libfminus_runtime.a` | `bin/fminus` was installed or copied without its `lib/fminus/` (the component `runtime`): install both, unpack the whole archive, or set `FMINUS_RUNTIME_DIR` to the directory that holds the runtime's archives |
+| `cmake --install` warns that the install lacks LLVM's `LICENSE.TXT` | the tree's LLVM flavor came from an archive made before an install of LLVM held its license, and the deps cache has no LLVM source: put llvm-project's `llvm/LICENSE.TXT` (of the pinned version) in `.deps/src/llvm-project-<version>/llvm/`, or in the flavor's directory under `.deps/install/`, and configure again |
+| `fminus prog.fm -o out` makes an executable, or says a program needs a `main` | `-o`'s extension says what to write ([programs.md](programs.md), "The commands"): name IR `.ll`, or pass `--emit ll` |
 | Windows: `--emit exe` fails with `LNK1104: cannot open file 'msvcrt.lib'` | run from an x64 developer prompt, whose `LIB` names the C runtime's and the Windows SDK's libraries |
 | Windows: `error STL1000: Unexpected compiler version, expected Clang 20 or newer` | the clang-cl is an older Visual Studio's than the C++ library it found ([Windows](#windows), "Two Visual Studios"): build from that Visual Studio's developer prompt, or add "C++ Clang tools for Windows" to the newest Visual Studio and delete `build-<preset>/` |
 | Windows: `no member named 'aligned_alloc' in namespace 'std'` | the Windows C runtime has none: `_aligned_malloc`, freed with `_aligned_free`, as `alignedAlloc` and `alignedFree` do in the examples' harnesses ([Windows](#windows)) |

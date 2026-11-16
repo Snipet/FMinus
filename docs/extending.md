@@ -7895,10 +7895,12 @@ them: `WebSymbols.def` lists them under `FMINUS_WEB_MAIN_SYMBOL`, which `Constan
 and `JitRuntime.cpp` does not (a JIT never defines them), and `declare` (`Functions.cpp`) refuses a function of a
 program, a prototype or a definition, whose name begins `fminus_web_` (`ir::kWebPrefix`), in every build, so that a
 program cannot call the library past its literals and `webRequests()`. `emitExecutable` links the web library's archives only when the module
-declares a `fminus_web_` function: `src/CMakeLists.txt` writes the list (`libfminus_web.a`, then `FMINUS_WEB_LINK`
-from `FMinusWeb.cmake`: libcurl's and Mbed TLS's archives and the system libraries libcurl's own CMake links on the
-platform) into `generated/support/WebLink.inc`, which `linkExecutable` includes. An executable that makes no request
-is linked as before.
+declares a `fminus_web_` function: `src/CMakeLists.txt` writes the list (`libfminus_web.a`, then
+`FMINUS_WEB_ARCHIVES` from `FMinusWeb.cmake`, libcurl's and Mbed TLS's archives, each with its path in the build tree
+or the deps cache and its file's name in an install's `lib/fminus/`, then `FMINUS_WEB_SYSTEM_LIBRARIES`, the system
+libraries libcurl's own CMake links on the platform) into `generated/support/WebLink.inc`, which `linkExecutable`
+includes (`findToolchain` takes the archives from where it finds the runtime's: building.md, "Installing"). An
+executable that makes no request is linked as before.
 
 ### The scaffolding stays
 

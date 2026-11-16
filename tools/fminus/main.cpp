@@ -1,11 +1,25 @@
 // tools/fminus/main.cpp: the FMinus compiler driver. FMinus v0 source goes to its syntax tree, LLVM IR, assembly, an
-// object file or an executable, or is JIT-compiled and called:
+// object file or an executable, or is JIT-compiled and called. Its command line is a C compiler's where they meet:
 //     fminus gain.fm                        the optimised IR (-O2) on stdout
 //     fminus gain.fm -O0                    the IR as the code generator wrote it
-//     fminus gain.fm --emit ast             the syntax tree
+//     fminus gain.fm -o gain                an executable that runs the program's main (support/Aot.h), as cc makes
+//                                           one: with no --emit, -c, -S or -emit-llvm, -o's extension says what to
+//                                           write (.ll IR, .bc bitcode, .s or .asm assembly, .o or .obj an object
+//                                           file, .fm what --emit fm writes; in any case), any other name an
+//                                           executable, and a device or a pipe (-o /dev/null) the IR, as without -o
+//     fminus -c gain.fm                     an object file, gain.o in the current directory (clang's -c; -S: assembly,
+//                                           gain.s; -S -emit-llvm: IR, gain.ll; -c -emit-llvm: bitcode, gain.bc; with
+//                                           -o, that file); -emit-llvm alone is --emit ll; two that ask for different
+//                                           outputs, or one that --emit contradicts, are an error
+//     fminus gain.fm --emit ast             the syntax tree (--emit ll, bc, asm, obj, exe, fm: as above, on stdout
+//                                           without -o, but exe)
 //     fminus gain.fm --emit asm -o -        this machine's assembly (--emit obj: an object file)
-//     fminus gain.fm --emit exe -o gain     an executable that runs the program's main (support/Aot.h)
+//     fminus gain.fm --emit exe -o gain     an executable, whatever -o's extension
 //     fminus gain.fm --entry                the IR with that executable's C main (also for asm and obj)
+//     fminus --version                      FMinus's version, its LLVM's, the target and the features of the build
+//     fminus --print-runtime                what an executable links (the runtime's archives) and through which C++
+//                                           compiler driver, and where each was found: an install's beside fminus, a
+//                                           build tree's in its tree; FMINUS_RUNTIME_DIR and FMINUS_LINK_DRIVER choose
 //     fminus gain.fm --run gain 0.5 2       JIT-compiles the program, calls gain(0.5, 2) and prints the result (its
 //                                           parameters bools, ints, floats and doubles; its result one of those, or
 //                                           nothing)
@@ -52,6 +66,7 @@
 //     fminus pedal.cir --probes --nodes --emit fm   the module with its probe fields (Options::probes), and the
 //                                           netlist's nodes as a probe sees them (Result::nodes) on stderr
 #include "fminus/Circuit.h"
+#include "fminus/Config.h"   // FMINUS_VERSION_STRING, FMINUS_LLVM_PACKAGE_VERSION, FMINUS_HAS_*
 #include "frontend/Frontend.h"
 #include "ir/CodeGen.h"
 #include "jit/Call.h"
@@ -70,6 +85,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Error.h>
@@ -79,6 +95,7 @@
 #include <llvm/Support/Path.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
+#include <llvm/TargetParser/Host.h>
 
 #include <algorithm>
 #include <array>
@@ -543,6 +560,122 @@ namespace
         out << text;
         return 0;
     }
+
+    int writeBitcode(const std::string& path, const llvm::Module& module)
+    {
+        std::error_code ec;
+        llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_None);
+        if (ec)
+            return fail(llvm::createFileError(path, ec));
+        llvm::WriteBitcodeToFile(module, out);
+        return 0;
+    }
+
+    // What each kind of output is, for the messages: --emit's names.
+    const char* described(std::string_view kind)
+    {
+        if (kind == "ast")
+            return "the syntax tree";
+        if (kind == "ll")
+            return "LLVM IR";
+        if (kind == "bc")
+            return "LLVM bitcode";
+        if (kind == "asm")
+            return "assembly";
+        if (kind == "obj")
+            return "an object file";
+        if (kind == "exe")
+            return "an executable";
+        return "a netlist's FMinus module";
+    }
+
+    // What -o's name says to write, by its extension, in any case, when no option says (as a C compiler reads it):
+    // .ll IR, .bc bitcode, .s and .asm assembly, .o and .obj an object file, .fm a netlist's module; empty for any
+    // other extension, or none.
+    std::string kindOfName(std::string_view path)
+    {
+        std::string extension(llvm::sys::path::extension(path));
+        for (char& c : extension)
+            c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        if (extension == ".ll")
+            return "ll";
+        if (extension == ".bc")
+            return "bc";
+        if (extension == ".s" || extension == ".asm")
+            return "asm";
+        if (extension == ".o" || extension == ".obj")
+            return "obj";
+        if (extension == ".fm")
+            return "fm";
+        return {};
+    }
+
+    // Whether `path` is a device or a pipe (/dev/null, /dev/stdout, a FIFO; on Windows, NUL), which -o names to see or
+    // discard what is written, not to make an executable there: it gets the IR, as it always did.
+    bool isDeviceOrPipe(const std::string& path)
+    {
+#ifdef _WIN32
+        if (llvm::StringRef(path).equals_insensitive("nul"))
+            return true;
+#endif
+        llvm::sys::fs::file_status status;
+        if (llvm::sys::fs::status(path, status))
+            return false;
+        const llvm::sys::fs::file_type type = status.type();
+        return type != llvm::sys::fs::file_type::regular_file && type != llvm::sys::fs::file_type::directory_file
+               && type != llvm::sys::fs::file_type::file_not_found;
+    }
+
+    // An option that says what to write, and the kinds it allows, what it asks for alone first: --emit's one; -c an
+    // object file, or with -emit-llvm bitcode; -S assembly, or with -emit-llvm IR; -emit-llvm IR, or with -c bitcode.
+    struct OutputOption
+    {
+        std::string name;
+        std::vector<std::string> kinds;
+    };
+
+    // fminus --version, as clang --version says itself: the version, the LLVM it was built with, the target its code is
+    // for (this machine's, as the JIT's), the features of the build, and where it is.
+    std::string versionText()
+    {
+        std::string features;
+        for (const auto& [name, on] : {std::pair{"json", FMINUS_HAS_JSON != 0}, std::pair{"xml", FMINUS_HAS_XML != 0},
+                                       std::pair{"web", FMINUS_HAS_WEB != 0},
+                                       std::pair{"web-server", FMINUS_HAS_WEB_SERVER != 0},
+                                       std::pair{"files", FMINUS_HAS_FILES != 0},
+                                       std::pair{"files-write", FMINUS_HAS_FILES_WRITE != 0},
+                                       std::pair{"files-anywhere", FMINUS_HAS_FILES_ANYWHERE != 0}})
+            features += std::string(features.empty() ? "" : " ") + (on ? "+" : "-") + name;
+        const std::string executable = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+        return std::format("fminus version {} (LLVM {})\nTarget: {}\nFeatures: {}\nInstalledDir: {}",
+                           FMINUS_VERSION_STRING, FMINUS_LLVM_PACKAGE_VERSION, llvm::sys::getProcessTriple(), features,
+                           llvm::sys::path::parent_path(executable).str());
+    }
+
+    // fminus --print-runtime: what linkExecutable would link with and through, and how it found each (support/Aot.h);
+    // 1 when it finds no runtime or no driver.
+    int printRuntime()
+    {
+        const fminus::aot::Toolchain found = fminus::aot::findToolchain();
+        const auto joined = [](const std::vector<std::string>& items, const char* separator) {
+            std::string text;
+            for (const std::string& item : items)
+                text += (text.empty() ? "" : separator) + item;
+            return text;
+        };
+        llvm::raw_ostream& out = llvm::outs();
+        if (found.runtime.empty())
+            out << "runtime: not found: " << joined(found.runtimeTried, ", ") << "\n";
+        else
+            out << "runtime: " << found.runtime << "\nruntime-found: " << found.runtimeFrom << "\n";
+        if (!found.web.empty())
+            out << "web: " << joined(found.web, " ") << "\n";
+        if (found.driver.empty())
+            out << "driver: not found: " << joined(found.driverTried, ", ") << "\n";
+        else
+            out << "driver: " << found.driver << "\ndriver-found: " << found.driverFrom << "\n";
+        return found.runtime.empty() || found.driver.empty() ? 1 : 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -552,6 +685,11 @@ int main(int argc, char** argv)
     CLI::App app{"The FMinus compiler: FMinus v0 source to its syntax tree, LLVM IR, assembly, an object file or an "
                  "executable, or JIT-compiled and run.",
                  "fminus"};
+    app.footer("With no -o, --emit, -c, -S or -emit-llvm, fminus writes the optimised IR on stdout. `fminus prog.fm -o "
+               "prog` makes an executable, as a C compiler does, linked through a C++ compiler driver against FMinus's "
+               "runtime: --print-runtime says which, and where each was found.");
+    app.set_version_flag("--version", versionText, "Print FMinus's version, its LLVM's, the target and the build's "
+                                                   "features, and exit");
     std::string input;
     std::string output = "-";
     std::string emit = "ll";
@@ -584,16 +722,39 @@ int main(int argc, char** argv)
     std::vector<std::string> filesTypes;
     bool filesAnywhere = false;
     CircuitSettings circuitSettings;
-    app.add_option("input", input, "FMinus source file ('-' for stdin)")->required();
+    bool objectFile = false;   // -c
+    bool assembly = false;     // -S
+    bool emitLlvm = false;     // -emit-llvm
+    bool printRuntimeAndExit = false;
+    app.add_option("input", input, "FMinus source file ('-' for stdin), or a circuit netlist (.cir)");
     app.add_option("args", runArgs,
                    "The arguments of --run's function: a bool, an int, a float or a double each, or an array's "
                    "elements separated by commas (1,2,3) for a pointer");
-    app.add_option("-o,--output", output, "The output file ('-' is stdout)")->capture_default_str();
-    app.add_option("--emit", emit,
-                   "What to write: ast, ll, asm, obj, exe (an executable that runs main), or fm (the FMinus module a "
-                   "circuit netlist, .cir, generates)")
-        ->check(CLI::IsMember({"ast", "ll", "asm", "obj", "exe", "fm"}))
-        ->capture_default_str();
+    CLI::Option* outputOption =
+        app.add_option("-o,--output", output,
+                       "The output file ('-' is stdout). With no --emit, -c, -S or -emit-llvm, its extension says what "
+                       "to write: .ll LLVM IR, .bc bitcode, .s or .asm assembly, .o or .obj an object file, .fm a "
+                       "netlist's module; any other name an executable that runs main, and a device or a pipe "
+                       "(/dev/null) the IR")
+            ->capture_default_str();
+    CLI::Option* emitOption =
+        app.add_option("--emit", emit,
+                       "What to write: ast, ll, bc (LLVM bitcode), asm, obj, exe (an executable that runs main), or fm "
+                       "(the FMinus module a circuit netlist, .cir, generates)")
+            ->check(CLI::IsMember({"ast", "ll", "bc", "asm", "obj", "exe", "fm"}))
+            ->capture_default_str();
+    app.add_flag("-c", objectFile,
+                 "Write an object file (clang's -c; with -emit-llvm, bitcode): -o's file, or the input's name with .o "
+                 "(.bc) in the current directory");
+    app.add_flag("-S", assembly,
+                 "Write this machine's assembly (clang's -S; with -emit-llvm, LLVM IR): -o's file, or the input's name "
+                 "with .s (.ll) in the current directory");
+    app.add_flag("--emit-llvm", emitLlvm,
+                 "Write LLVM IR (clang's -emit-llvm, which fminus takes with one dash too): --emit ll, or with -S or "
+                 "-c as they say");
+    app.add_flag("--print-runtime", printRuntimeAndExit,
+                 "Print what an executable is linked with (the runtime's archives) and through (a C++ compiler "
+                 "driver), and where each was found, and exit (1 when either is missing)");
     app.add_option("-O", level, "Optimisation level, 0 to 3")->check(CLI::Range(0, 3))->capture_default_str();
     app.add_option("--run", run, "JIT-compile, call this function with the arguments and print its result");
     app.add_option("--poly-lanes", polyLanes, "A poly float's lanes: 1, 2, 4, ... 64 (by default, this machine's)")
@@ -699,8 +860,77 @@ int main(int argc, char** argv)
                  "same output");
     app.add_flag("--nodes", circuitSettings.nodes,
                  "Print each circuit netlist's nodes as a probe sees them: rate, DC volts, whether it can be read");
-    CLI11_PARSE(app, argc, argv);
+    // clang's -emit-llvm, one dash before a long name, which CLI11 would read as short flags: given to it as
+    // --emit-llvm.
+    std::vector<std::string> commandLine(argv, argv + argc);
+    std::vector<char*> commandLinePointers;
+    for (std::string& word : commandLine)
+    {
+        if (word == "-emit-llvm")
+            word = "--emit-llvm";
+        commandLinePointers.push_back(word.data());
+    }
+    CLI11_PARSE(app, static_cast<int>(commandLinePointers.size()), commandLinePointers.data());
+    if (printRuntimeAndExit)
+        return printRuntime();
+    if (input.empty())
+        return app.exit(CLI::RequiredError("input"));
     circuitSettings.threads = threads;
+
+    // What to write: what --emit, -c, -S and -emit-llvm ask for, which must agree (-c -emit-llvm is bitcode, -S
+    // -emit-llvm IR); with none of them, what -o's name says (an executable, as a C compiler makes, but for IR's,
+    // assembly's, an object's and a netlist module's extensions, and a device or a pipe); with no -o either, the IR.
+    {
+        std::vector<OutputOption> asked;
+        if (emitOption->count() > 0)
+            asked.push_back({"--emit " + emit, {emit}});
+        if (objectFile)
+            asked.push_back({"-c", {"obj", "bc"}});
+        if (assembly)
+            asked.push_back({"-S", {"asm", "ll"}});
+        if (emitLlvm)
+            asked.push_back({"-emit-llvm", {"ll", "bc"}});
+        const auto allows = [](const OutputOption& option, const std::string& kind) {
+            return std::find(option.kinds.begin(), option.kinds.end(), kind) != option.kinds.end();
+        };
+        for (std::size_t i = 0; i < asked.size(); ++i)
+        {
+            for (std::size_t j = i + 1; j < asked.size(); ++j)
+            {
+                if (std::none_of(asked[i].kinds.begin(), asked[i].kinds.end(),
+                                 [&](const std::string& kind) { return allows(asked[j], kind); }))
+                    return fail(asked[i].name + " and " + asked[j].name + " ask for different outputs ("
+                                + described(asked[i].kinds.front()) + ", " + described(asked[j].kinds.front()) + ")");
+            }
+        }
+        if (!asked.empty())
+        {
+            for (const std::string& kind : asked.front().kinds)
+            {
+                if (std::all_of(asked.begin(), asked.end(),
+                                [&](const OutputOption& option) { return allows(option, kind); }))
+                {
+                    emit = kind;
+                    break;
+                }
+            }
+        }
+        else if (outputOption->count() > 0 && output != "-" && run.empty())
+        {
+            emit = kindOfName(output);
+            if (emit.empty())
+                emit = isDeviceOrPipe(output) ? "ll" : "exe";
+            if (emit == "fm" && !isNetlist(input))
+                return fail("-o " + output + ": a .fm file is what --emit fm writes, the FMinus module a circuit "
+                            "netlist (.cir) generates, and " + input + " is not one");
+        }
+        // -c and -S without -o: a file named after the input, in the current directory, as clang names it.
+        if ((objectFile || assembly) && outputOption->count() == 0 && input != "-")
+        {
+            const std::string extension = emit == "obj" ? ".o" : emit == "bc" ? ".bc" : emit == "asm" ? ".s" : ".ll";
+            output = std::string(llvm::sys::path::stem(input)) + extension;
+        }
+    }
     if (emit == "exe" && run.empty() && output == "-")
         return fail("--emit exe: an executable needs a file name (-o)");
     if ((!webAllow.empty() || !webCaFile.empty()) && FMINUS_HAS_WEB == 0)
@@ -1098,12 +1328,6 @@ int main(int argc, char** argv)
     }
     fminus::prepareModule(*module, **machine);
     fminus::optimiseModule(*module, **machine, optimisation);
-    if (emit == "exe")
-    {
-        if (llvm::Error error = fminus::aot::emitExecutable(*module, **machine, {.output = output}))
-            return fail(std::move(error));
-        return 0;
-    }
     if (emit == "ll")
     {
         std::string ir;
@@ -1111,8 +1335,21 @@ int main(int argc, char** argv)
         module->print(os, nullptr);
         return writeText(output, ir);
     }
+    if (emit == "bc")
+        return writeBitcode(output, *module);
+    // Machine code, written by the machine for files the system's linker takes (on Linux position-independent, in the
+    // small code model, as the JIT's own code there: support/HostTarget.h).
+    auto fileMachine = fminus::hostFileTargetMachine(fminus::codeGenLevel(optimisation));
+    if (!fileMachine)
+        return fail(fileMachine.takeError());
+    if (emit == "exe")
+    {
+        if (llvm::Error error = fminus::aot::emitExecutable(*module, **fileMachine, {.output = output}))
+            return fail(std::move(error));
+        return 0;
+    }
     const auto kind = emit == "asm" ? fminus::aot::FileKind::Assembly : fminus::aot::FileKind::Object;
-    if (llvm::Error error = fminus::aot::emitFile(*module, **machine, output, kind))
+    if (llvm::Error error = fminus::aot::emitFile(*module, **fileMachine, output, kind))
         return fail(std::move(error));
     return 0;
 }

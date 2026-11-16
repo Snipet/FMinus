@@ -1,0 +1,120 @@
+// The driver's command line, as a C compiler's (tools/fminus/main.cpp). With no --emit, -c, -S or -emit-llvm, -o's
+// extension says what to write, in any case (.ll IR, .bc bitcode, .s and .asm assembly, .o and .obj an object file),
+// any other name is an executable, and a device or a pipe gets the IR, as without -o; clang's -c, -S and -emit-llvm,
+// with -c and -S naming the file after the input when there is no -o; options that ask for different outputs; and
+// --version and --print-runtime (support/Aot.h, findToolchain). The install test (tests/install/) runs an installed one.
+// RUN: rm -rf %t && mkdir %t
+// RUN: fminus %s -o %t/note.ll
+// RUN: FileCheck %s --check-prefix=IR < %t/note.ll
+// RUN: fminus %s -o %t/upper.LL
+// RUN: FileCheck %s --check-prefix=IR < %t/upper.LL
+// RUN: fminus %s -o %t/note.bc
+// RUN: llvm-dis %t/note.bc -o - | FileCheck %s --check-prefix=IR
+// RUN: fminus %s -o %t/note.s
+// RUN: FileCheck %s --check-prefix=ASM < %t/note.s
+// RUN: fminus %s -o %t/note.asm
+// RUN: FileCheck %s --check-prefix=ASM < %t/note.asm
+// RUN: fminus %s -o %t/note.o
+// RUN: llvm-objdump -t %t/note.o | FileCheck %s --check-prefix=OBJ
+// RUN: fminus %s -o %t/note.obj
+// RUN: llvm-objdump -t %t/note.obj | FileCheck %s --check-prefix=OBJ
+// RUN: fminus %s -o %t/note
+// RUN: %t/note 69 | FileCheck %s --check-prefix=RESULT
+// RUN: %if !system-windows %{ fminus %s -o %t/note.out %}
+// RUN: %if !system-windows %{ %t/note.out 69 | FileCheck %s --check-prefix=RESULT %}
+//
+// The options say what to write whatever -o's name: --emit, -c, -S, and -emit-llvm alone (IR), with -S (IR) or with
+// -c (bitcode).
+// RUN: fminus %s --emit ll -o %t/named-ir
+// RUN: FileCheck %s --check-prefix=IR < %t/named-ir
+// RUN: fminus %s -c -o %t/object.txt
+// RUN: llvm-objdump -t %t/object.txt | FileCheck %s --check-prefix=OBJ
+// RUN: fminus %s -S -o %t/assembly.o
+// RUN: FileCheck %s --check-prefix=ASM < %t/assembly.o
+// RUN: fminus -emit-llvm %s | FileCheck %s --check-prefix=IR
+// RUN: fminus %s --emit-llvm -S -o %t/text
+// RUN: FileCheck %s --check-prefix=IR < %t/text
+// RUN: fminus %s -emit-llvm -c -o %t/bits
+// RUN: llvm-dis %t/bits -o - | FileCheck %s --check-prefix=IR
+// RUN: fminus %s --emit bc -c -o %t/agree.bc
+// RUN: llvm-dis %t/agree.bc -o - | FileCheck %s --check-prefix=IR
+//
+// Without -o, -c and -S write the input's name with .o, .s, .ll or .bc in the current directory; the IR stays on stdout,
+// and so does what comes from stdin.
+// RUN: fminus %s | FileCheck %s --check-prefix=IR
+// RUN: mkdir %t/here
+// RUN: cd %t/here && fminus -c %s && fminus -S %s && fminus -S -emit-llvm %s && fminus -c -emit-llvm %s
+// RUN: llvm-objdump -t %t/here/command-line.o | FileCheck %s --check-prefix=OBJ
+// RUN: FileCheck %s --check-prefix=ASM < %t/here/command-line.s
+// RUN: FileCheck %s --check-prefix=IR < %t/here/command-line.ll
+// RUN: llvm-dis %t/here/command-line.bc -o - | FileCheck %s --check-prefix=IR
+// RUN: fminus -c - < %s > %t/stdin.o
+// RUN: llvm-objdump -t %t/stdin.o | FileCheck %s --check-prefix=OBJ
+//
+// A device or a pipe gets the IR, as it always did: a program without a main compiles to /dev/null, where an executable
+// would need one.
+// RUN: %if !system-windows %{ echo 'float f() { return 1; }' | fminus - -o /dev/null %}
+// RUN: echo 'float f() { return 1; }' | not fminus - -o %t/never 2>&1 | FileCheck %s --check-prefix=MAIN
+//
+// Options that ask for different outputs, and a .fm name for what is not a netlist.
+// RUN: not fminus -c -S %s 2>&1 | FileCheck %s --check-prefix=C-S
+// RUN: not fminus -cS %s 2>&1 | FileCheck %s --check-prefix=C-S
+// RUN: not fminus %s --emit asm -c 2>&1 | FileCheck %s --check-prefix=EMIT-C
+// RUN: not fminus %s --emit exe -emit-llvm -o %t/never 2>&1 | FileCheck %s --check-prefix=EMIT-IR
+// RUN: not fminus %s -S --emit obj 2>&1 | FileCheck %s --check-prefix=S-EMIT
+// RUN: not fminus %s -o %t/never.fm 2>&1 | FileCheck %s --check-prefix=FM
+// RUN: not fminus 2>&1 | FileCheck %s --check-prefix=INPUT
+//
+// An executable linked on Linux takes no warning from the system's linker: its object is position-independent, in the
+// small code model, as LLJIT's own code there (support/HostTarget.h), with no text relocations in a PIE.
+// RUN: %if system-linux %{ fminus %s -o %t/clean 2>&1 | count 0 %}
+// RUN: %if system-linux %{ llvm-objdump -h %t/note.o | FileCheck %s --check-prefix=SECTIONS --implicit-check-not=.ltext %}
+//
+// --version, and --print-runtime: a build tree's fminus links its tree's runtime, through the compiler it was built
+// with; FMINUS_RUNTIME_DIR and FMINUS_LINK_DRIVER choose instead, and nothing else when what they name is not there.
+// RUN: fminus --version | FileCheck %s --check-prefix=VERSION
+// RUN: fminus --print-runtime | FileCheck %s --check-prefix=PRINT
+// RUN: not env FMINUS_RUNTIME_DIR=%t/nowhere fminus --print-runtime | FileCheck %s --check-prefix=PRINT-NOWHERE
+// RUN: not env FMINUS_RUNTIME_DIR=%t/nowhere fminus %s -o %t/never 2>&1 | FileCheck %s --check-prefix=NOWHERE
+// RUN: not env FMINUS_LINK_DRIVER=%t/no-such-driver fminus %s -o %t/never 2>&1 | FileCheck %s --check-prefix=NO-DRIVER
+// RUN: not env FMINUS_LINK_DRIVER=%t/no-such-driver fminus --print-runtime | FileCheck %s --check-prefix=PRINT-NO-DRIVER
+
+float frequency(float note)
+{
+    const float ln2 = 0.693147181f;
+    return 440 * expf((note - 69) / 12 * ln2);
+}
+
+float main(float note)
+{
+    return frequency(note);
+}
+
+// IR: define float @frequency(float
+// IR: define float @main(float
+// ASM: {{^_?frequency:}}
+// ASM: {{^_?main:}}
+// OBJ: SYMBOL TABLE:
+// OBJ-DAG: {{_?frequency$}}
+// OBJ-DAG: {{_?main$}}
+// RESULT: 440
+// MAIN: fminus: an executable needs a main function, such as float main(float x)
+// C-S: fminus: -c and -S ask for different outputs (an object file, assembly)
+// EMIT-C: fminus: --emit asm and -c ask for different outputs (assembly, an object file)
+// EMIT-IR: fminus: --emit exe and -emit-llvm ask for different outputs (an executable, LLVM IR)
+// S-EMIT: fminus: --emit obj and -S ask for different outputs (an object file, assembly)
+// FM: fminus: -o {{.*}}never.fm: a .fm file is what --emit fm writes, the FMinus module a circuit netlist (.cir) generates, and {{.*}}command-line.fm is not one
+// INPUT: input is required
+// SECTIONS: .text
+// VERSION:      fminus version {{[0-9]+\.[0-9]+\.[0-9]+}} (LLVM {{[0-9]+\.[0-9]+\.[0-9]+.*}})
+// VERSION-NEXT: Target: {{.+}}
+// VERSION-NEXT: Features: {{[-+]}}json {{[-+]}}xml {{[-+]}}web {{[-+]}}web-server {{[-+]}}files {{[-+]}}files-write {{[-+]}}files-anywhere
+// VERSION-NEXT: InstalledDir: {{.+}}
+// PRINT:      runtime: {{.*}}fminus_runtime{{.*}}
+// PRINT-NEXT: runtime-found: the build tree this FMinus was built in
+// PRINT:      driver: {{.+}}
+// PRINT-NEXT: driver-found: {{.+}}
+// PRINT-NOWHERE: runtime: not found: {{.*}}nowhere{{.*}}fminus_runtime{{.*}}
+// NOWHERE: fminus: linkExecutable: cannot find the FMinus runtime: no {{.*}}nowhere{{.*}}. Set FMINUS_RUNTIME_DIR to the directory that holds {{.*}}fminus_runtime{{.*}}
+// NO-DRIVER: fminus: linkExecutable: no C++ compiler to link with: tried {{.*}}no-such-driver (FMINUS_LINK_DRIVER). An executable is linked by a C++ toolchain
+// PRINT-NO-DRIVER: driver: not found: {{.*}}no-such-driver (FMINUS_LINK_DRIVER)
