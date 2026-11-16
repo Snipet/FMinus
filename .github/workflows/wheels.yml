@@ -145,7 +145,8 @@ jobs:
           fi
           name="fminus-deps-llvm-${version}-${{ matrix.platform }}"
           gh release download "deps-llvm-${version}" --pattern "$name.tar.gz" --pattern "$name.tar.gz.sha256"
-          if command -v sha256sum >/dev/null; then sha256sum -c "$name.tar.gz.sha256"; else shasum -a 256 -c "$name.tar.gz.sha256"; fi
+          expected=$(cut -d" " -f1 "$name.tar.gz.sha256"); actual=$(cmake -E sha256sum "$name.tar.gz" | cut -d" " -f1)
+          [ "$actual" = "$expected" ] || { echo "$name.tar.gz: SHA-256 $actual, not $expected"; exit 1; }
           tar -xzf "$name.tar.gz" -C install   # relative: Git Bash's tar takes D:\... for a remote host
           rm "$name.tar.gz" "$name.tar.gz.sha256"
           ls install

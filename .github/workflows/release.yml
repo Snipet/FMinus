@@ -147,7 +147,8 @@ jobs:
           fi
           name="fminus-deps-llvm-${version}-${{ matrix.platform }}"
           gh release download "deps-llvm-${version}" --pattern "$name.tar.gz" --pattern "$name.tar.gz.sha256"
-          if command -v sha256sum >/dev/null; then sha256sum -c "$name.tar.gz.sha256"; else shasum -a 256 -c "$name.tar.gz.sha256"; fi
+          expected=$(cut -d" " -f1 "$name.tar.gz.sha256"); actual=$(cmake -E sha256sum "$name.tar.gz" | cut -d" " -f1)
+          [ "$actual" = "$expected" ] || { echo "$name.tar.gz: SHA-256 $actual, not $expected"; exit 1; }
           tar -xzf "$name.tar.gz" -C install   # relative: Git Bash's tar takes D:\... for a remote host
           rm "$name.tar.gz" "$name.tar.gz.sha256"
           ls install
@@ -166,7 +167,8 @@ jobs:
           if [ ${#missing[@]} -eq 0 ]; then echo "every LLVM $version install has its LICENSE.TXT (or there is none yet)"; exit 0; fi
           if [ -f "src/llvm-project-$version/llvm/LICENSE.TXT" ]; then echo "the deps cache has LLVM's source"; exit 0; fi
           curl -fsSL --retry 3 -o llvm.tar.xz "$url"
-          if command -v sha256sum >/dev/null; then echo "$sha  llvm.tar.xz" | sha256sum -c; else echo "$sha  llvm.tar.xz" | shasum -a 256 -c; fi
+          actual=$(cmake -E sha256sum llvm.tar.xz | cut -d" " -f1)   # CMake's: macOS's sha256sum reads no stdin list
+          [ "$actual" = "$sha" ] || { echo "llvm.tar.xz: SHA-256 $actual, not the pinned $sha"; exit 1; }
           cmake -E tar tf llvm.tar.xz | tr -d '\r' > members.txt
           license=$(grep -x '[^/]*/llvm/LICENSE.TXT' members.txt)
           [ -n "$license" ] || { echo "llvm-project's source has no llvm/LICENSE.TXT"; exit 1; }
@@ -200,7 +202,7 @@ jobs:
           [ ${#made[@]} -eq 1 ] || { echo "cpack made ${#made[@]} archives: ${made[*]}"; ls -la; exit 1; }
           archive="${made[0]}"
           case "$archive" in *-${{ matrix.platform }}.*) ;; *) echo "$archive is not named for ${{ matrix.platform }}"; exit 1 ;; esac
-          if command -v sha256sum >/dev/null; then sha256sum "$archive"; else shasum -a 256 "$archive"; fi > "$archive.sha256"
+          cmake -E sha256sum "$archive" > "$archive.sha256"
           ls -l "$archive"; cat "$archive.sha256"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "name=${archive%.tar.gz}" | sed 's/\.zip$//' >> "$GITHUB_OUTPUT"
