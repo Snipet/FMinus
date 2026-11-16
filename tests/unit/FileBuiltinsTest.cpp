@@ -708,11 +708,15 @@ namespace
         void* memory;
     };
 
+#if FMINUS_HAS_FILES_WRITE || !defined(_WIN32)
+    // A file's bytes: what a write left, or what an executable printed (its users are in a build with file writing,
+    // and off Windows).
     std::string contents(const fs::path& file)
     {
         std::ifstream in(file, std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     }
+#endif
 
     // A kit: a folder of raw float tables, listed, each loaded into the module, one played on the audio thread
     // (between blocks: a nonblocking method), one written back in a build with writing.
