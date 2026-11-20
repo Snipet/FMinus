@@ -708,7 +708,7 @@ namespace
         void* memory;
     };
 
-    std::string contents(const fs::path& file)
+    [[maybe_unused]] std::string contents(const fs::path& file)
     {
         std::ifstream in(file, std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
