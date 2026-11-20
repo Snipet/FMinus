@@ -134,5 +134,5 @@ float main(float k)
 // GRANT: fminus: --files-deny: needs --files-read, --files-write or --files-anywhere, which grant what it narrows
 // SPEC: fminus: --files-read: 'kit=' is NAME=DIR, or a DIR named after its last segment
 // NAME: fminus: --files-read: folders: '.kit' is not a folder's name: 1 to 64 ASCII letters, digits, '_' and '-', not beginning with '-'
-// MISSING: fminus: --files-read: folders: 'kit': '{{.*}}none' cannot be opened: No such file or directory
+// MISSING: fminus: --files-read: folders: 'kit': '{{.*}}none' cannot be opened: {{(No such file or directory|error 2)}}
 // TYPES: fminus: --files-types: types: '.f32' is not an extension: 1 to 16 ASCII letters and digits, without the dot
