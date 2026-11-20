@@ -5,6 +5,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Error.h>
@@ -86,18 +89,63 @@ TEST_CASE("a bool main's result is printed as true or false", "[aot]")
     CHECK(module->getFunction("fminus_rt_main_result") == nullptr);
 }
 
-TEST_CASE("an executable needs a main that takes floats and doubles and returns a float, a double or a bool", "[aot]")
+TEST_CASE("an int main's result is the exit status, and nothing is printed", "[aot]")
+{
+    llvm::LLVMContext context;
+    std::unique_ptr<llvm::Module> module = parse(context, "define i32 @main() {\n  ret i32 3\n}\n");
+    REQUIRE_FALSE(llvm::errorToBool(fminus::aot::addEntryPoint(*module)));
+    CHECK(module->getFunction("fminus_rt_main_result") == nullptr);
+    CHECK(module->getFunction("fminus_rt_main_double_result") == nullptr);
+    CHECK(module->getFunction("fminus_rt_main_bool_result") == nullptr);
+    const llvm::Function* entry = module->getFunction("main");
+    REQUIRE(entry != nullptr);
+    // The C main returns what the program's returned: a ret of the call's value, not of a constant.
+    bool returnsResult = false;
+    for (const llvm::BasicBlock& block : *entry)
+    {
+        if (const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator()))
+            returnsResult = returnsResult || llvm::isa<llvm::CallInst>(ret->getReturnValue());
+    }
+    CHECK(returnsResult);
+}
+
+TEST_CASE("a main with an int or a string reads every argument into a slot as its type says", "[aot]")
+{
+    llvm::LLVMContext context;
+    std::unique_ptr<llvm::Module> module =
+        parse(context, "define i32 @main({ ptr, i32 } %name, i32 %n, float %x, double %d) {\n"
+                       "  ret i32 %n\n}\n");
+    REQUIRE_FALSE(llvm::errorToBool(fminus::aot::addEntryPoint(*module)));
+    CHECK(module->getFunction("fminus_rt_main_args") == nullptr);
+    CHECK(module->getFunction("fminus_rt_main_double_args") == nullptr);
+    const llvm::Function* read = module->getFunction("fminus_rt_main_slot_args");
+    REQUIRE(read != nullptr);
+    CHECK(read->arg_size() == 5);   // argc, argv, the count, the kinds ("sifd") and the slots
+    const llvm::GlobalVariable* kinds = module->getNamedGlobal("main.kinds");
+    REQUIRE(kinds != nullptr);
+    const auto* text = llvm::dyn_cast<llvm::ConstantDataArray>(kinds->getInitializer());
+    REQUIRE(text != nullptr);
+    CHECK(text->getAsCString() == "sifd");
+}
+
+TEST_CASE("an executable needs a main of ints, floats, doubles and strings that returns an int, a float, a double or "
+          "a bool",
+          "[aot]")
 {
     const std::string missing = "an executable needs a main function, such as float main(float x)";
-    const std::string signature =
-        "'main' must return float, double or bool and take only float and double parameters";
+    const std::string signature = "'main' must return int, float, double or bool and take only int, float, double and "
+                                  "string parameters";
     CHECK(entryError("define float @f() {\n  ret float 1.0\n}\n") == missing);
     CHECK(entryError("declare float @main(float)\n") == missing);   // a prototype is not a program
     CHECK(entryError("define i1 @main() {\n  ret i1 true\n}\n").empty());
     CHECK(entryError("define double @main(double %t, float %x) {\n  ret double %t\n}\n").empty());
     CHECK(entryError("define float @main(double %t) {\n  ret float 1.0\n}\n").empty());
-    CHECK(entryError("define i32 @main() {\n  ret i32 0\n}\n") == signature);
+    CHECK(entryError("define i32 @main() {\n  ret i32 0\n}\n").empty());
+    CHECK(entryError("define i32 @main(i32 %n, { ptr, i32 } %s) {\n  ret i32 %n\n}\n").empty());
     CHECK(entryError("define float @main(i1 %b) {\n  ret float 1.0\n}\n") == signature);
     CHECK(entryError("define float @main(<4 x float> %v) {\n  ret float 1.0\n}\n") == signature);
+    CHECK(entryError("define float @main(ptr %p) {\n  ret float 1.0\n}\n") == signature);
+    CHECK(entryError("define float @main({ ptr, i64 } %s) {\n  ret float 1.0\n}\n") == signature);
+    CHECK(entryError("define i64 @main() {\n  ret i64 0\n}\n") == signature);
     CHECK(entryError("define float @main(...) {\n  ret float 1.0\n}\n") == signature);
 }

@@ -74,6 +74,11 @@ explain, review, debug, fix the build or the toolchain. Do not write or rewrite 
   handed an array of pointers reads memory that is not its arguments': say so in `kRuntimeFacts`. No preset builds a
   tree without JSON, XML or the file interface, nor the web library without its server, nor the server without JSON:
   build those after a change to anything a feature gates (`docs/testing.md`, "Builds that leave features out").
+- Offline data (the user asked for the plan, 2026-11-20, and for it to be built, the same day;
+  `docs/research/data/`): its step 1 is built, `int main` (the exit status) with `int` and `string` parameters, and
+  `printf` and `eprintf` (`src/ir/Print.cpp` checks the format; `src/runtime/Print.cpp` writes it, through
+  `runtime/Printf.h`, the one formatter, which the web server's replies use too). Steps 2 to 5 (CSV, reductions and
+  sorts, CSV and `.npy` out, the library in FMinus) are not built yet.
 - The smoke tests (`tests/smoke/`, `tests/lit/smoke/`) prove the toolchain. Keep them passing until the user retires
   them.
 - `docs/` is the manual (architecture, extending, building, testing; `docs/recipes/` patches). Keep it in step with

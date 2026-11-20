@@ -1,0 +1,55 @@
+// printf's format is a string literal, C's printf's in part, checked where it is written as clang checks printf's
+// (src/ir/Print.cpp): flags '-', '+', ' ' and '0', a width of at most 999, a precision of at most 99, and d, i, f, e, g,
+// s or %% alone; each value checked against its place. printf and eprintf allocate, in the effects' terms: refused in a
+// nonallocating or a nonblocking function. And an int main's parameters, as the executable's entry takes them.
+// RUN: not fminus %s 2>&1 | FileCheck %s --implicit-check-not=error:
+// RUN: echo 'float main(bool b) { return 1; }' | not fminus - --emit exe -o %t 2>&1 | FileCheck %s --check-prefix=MAIN
+
+void a() { printf("%x", 1); }
+void b() { printf("%ld", 1); }
+void c() { printf("%*d", 3, 1); }
+void d() { printf("%#g", 1.0); }
+void e() { printf("%1000d", 1); }
+void f() { printf("%.100f", 1.0); }
+void g() { printf("%05s", "x"); }
+void h() { printf("%-05d", 1); }
+void i() { printf("%+ d", 1); }
+void j() { printf("%5%"); }
+void k() { printf("%d", 1.5f); }
+void l() { printf("%f", 1); }
+void m() { printf("%s", 1); }
+void n() { printf("%d %d", 1); }
+void o() { printf("x", 1); }
+void p() { printf("%"); }
+void q() { printf("%q"); }
+void w() { printf("%k"); }
+void r(string s) { printf(s); }
+void t() [[clang::nonallocating]] { printf("x"); }
+void u() [[clang::nonblocking]] { eprintf("x"); }
+void v() { printf("%d", "1"); }
+
+// CHECK: printf-errors.fm:8:21: error: invalid conversion specifier 'x'
+// CHECK: printf-errors.fm:8:21: note: printf takes %d and %i, an int; %f, %e and %g, a float or a double; %s, a string; each with C's flags '-', '+', ' ' and '0', a width and a precision; and %%, a percent sign
+// CHECK: printf-errors.fm:9:21: error: length modifier 'l' is not printf's in FMinus: %d takes an int, and %f, %e and %g a float or a double
+// CHECK: printf-errors.fm:10:21: error: a width or a precision of '*' is not printf's in FMinus: write the number in the format
+// CHECK: printf-errors.fm:11:21: error: flag '#' is not printf's in FMinus: it takes '-', '+', ' ' and '0'
+// CHECK: printf-errors.fm:12:21: error: a width of printf's is at most 999
+// CHECK: printf-errors.fm:13:22: error: a precision of printf's is at most 99
+// CHECK: printf-errors.fm:14:21: error: flag '0' results in undefined behavior with 's' conversion specifier
+// CHECK: printf-errors.fm:15:22: error: flag '0' is ignored when flag '-' is present
+// CHECK: printf-errors.fm:16:22: error: flag ' ' is ignored when flag '+' is present
+// CHECK: printf-errors.fm:17:21: error: a percent sign is %% alone, with no flag, width or precision between
+// CHECK: printf-errors.fm:18:25: error: format specifies type 'int' but the argument has type 'float'
+// CHECK: printf-errors.fm:19:25: error: format specifies type 'double' but the argument has type 'int'
+// CHECK: printf-errors.fm:20:25: error: format specifies type 'string' but the argument has type 'int'
+// CHECK: printf-errors.fm:21:24: error: more '%' conversions than data arguments
+// CHECK: printf-errors.fm:22:24: error: data argument not used by format string
+// CHECK: printf-errors.fm:23:20: error: incomplete format specifier
+// 'q' is a length modifier (BSD's quad) to clang too: what follows is no conversion.
+// CHECK: printf-errors.fm:24:20: error: incomplete format specifier
+// CHECK: printf-errors.fm:25:21: error: invalid conversion specifier 'k'
+// CHECK: printf-errors.fm:26:27: error: argument to 'printf' must be a string literal
+// CHECK: printf-errors.fm:27:37: error: function with 'nonallocating' attribute must not call non-'nonallocating' function 'printf'
+// CHECK: printf-errors.fm:28:35: error: function with 'nonblocking' attribute must not call non-'nonblocking' function 'eprintf'
+// CHECK: printf-errors.fm:29:25: error: format specifies type 'int' but the argument has type 'char *'
+// MAIN: fminus: 'main' must return int, float, double or bool and take only int, float, double and string parameters

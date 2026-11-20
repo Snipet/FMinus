@@ -861,7 +861,9 @@ Errors: `format specifies type 'int' but the argument has type 'float'`, `format
 argument has type 'int'`, `format specifies type 'string' but the argument has type 'int'`, `more '%' conversions than
 data arguments`, `data argument not used by format string`,
 `invalid conversion specifier 'f'`, and FMinus's own `a reply's %.Ng takes a precision N of 1 to 17`. The text is
-written by `std::to_chars` into the request's own buffer, the same in every locale, with no allocation. As in C, a NaN
+written by `printf`'s formatter (`src/runtime/Printf.h`, the runtime's, a header: `std::to_chars`) into the request's
+own buffer, the same in every locale, with no allocation. A reply's format is a part of `printf`'s
+([programs.md](programs.md), "Printing"): its places are the ones a reply had before `printf` came. As in C, a NaN
 is `nan` and an infinity `inf`, which JSON cannot hold: a program that might have one says so itself. Arrays of numbers
 go as bytes (`http_reply_bytes(r, 200, table, 8192, "application/octet-stream")`, a `Float32Array` to a page), which is
 also what `bytes_floats` reads on the way in (`bytes_floats(http_body(r), http_size(r), table, 2048)`).

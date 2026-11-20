@@ -362,6 +362,11 @@ it to `pypi`.
   `fminus x.cir --emit fm` and load that.
 - **Vectors at the boundary**: a function that takes or returns `float2`, `float4`, `float8` or a `poly float` has no
   `Function` (the library's `call()` passes none); pass buffers and load vectors inside FMinus.
+- **`printf`'s text in Python's streams.** A program's `printf` and `eprintf` write to the process's C streams, file
+  descriptors 1 and 2 ([programs.md](programs.md), "Printing"), not to `sys.stdout` and `sys.stderr`: in a terminal the
+  two meet, but a notebook, or a test that captures `sys.stdout`, does not see them.
+- **Strings at the boundary**: `call()` passes no `string` (the driver's `--run` does), so a function that takes one has
+  no `Function`.
 - **A list of a program's functions.** The library lists a module's methods (`module.methods`) but not the functions
   outside modules, so `dir(program)` does not show them.
 - **`fminus::math`** (the kernels as C++ functions), and executables (`fminus-build`'s side, `support/Aot.h`).

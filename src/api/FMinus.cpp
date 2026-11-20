@@ -210,6 +210,8 @@ namespace fminus
                 return Kind::Double;
             case jit::CallType::Pointer:
                 return Kind::Pointer;
+            case jit::CallType::String:   // the driver's --run passes one; call() has no Value of the kind yet
+                return std::nullopt;
             }
             return std::nullopt;
         }

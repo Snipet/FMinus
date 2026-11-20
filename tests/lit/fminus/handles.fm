@@ -54,7 +54,7 @@ void* made(int n)
 int isNull(fft_plan p) { return p ? 0 : 1; }
 fft_plan plan(int n) { return fft_create(n); }
 
-// RUNS: fminus: --run: 'isNull' takes a parameter of type 'fft_plan'; --run passes bools, ints, floats, doubles and arrays of ints, floats and doubles only
+// RUNS: fminus: --run: 'isNull' takes a parameter of type 'fft_plan'; --run passes bools, ints, floats, doubles, strings and arrays of ints, floats and doubles only
 // RESULT: fminus: --run: 'plan' returns 'fft_plan'; --run prints bools, ints, floats and doubles only
 
 // ERRORS

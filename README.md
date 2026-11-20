@@ -20,8 +20,9 @@ repository.
   ever, and while you develop, bounds checks stop an index outside its array and say where.
 - **DSP is built in.** `float2`, `float4` and `float8` vectors, `poly float` (as wide as the machine's vectors),
   parameters a host turns into knobs and streams, an FFT, and `parallel for`.
-- **It reaches beyond audio.** An HTTP client and server (`serve`, `route`, `reply`), a `string` type, JSON and XML,
-  files, `within` (a deadline for a block's requests) and `when` (a rising edge). Every URL, route and file name is a
+- **It reaches beyond audio.** Command-line tools (`int main(string name, int n)`, C's `printf`), an HTTP client and
+  server (`serve`, `route`, `reply`), a `string` type, JSON and XML, files, `within` (a deadline for a block's
+  requests) and `when` (a rising edge). Every URL, route and file name is a
   literal the host can list before anything runs, and a program reaches nothing its host does not allow.
 - **It fits in your project.** One C++ header, a Python package, a JUCE plugin example, and a compiler from SPICE
   netlists to FMinus modules for analog circuits.

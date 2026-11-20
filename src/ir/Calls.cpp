@@ -88,6 +88,13 @@ namespace fminus::ir::detail
         RuntimeBuiltin{"__fminus_string_hash", "fminus_rt_string_hash", {Param::Format}, 1, RuntimeEffect::WaitFree},
         RuntimeBuiltin{"__fminus_string_hash_blocking", "fminus_rt_string_hash", {Param::Format}, 1,
                        RuntimeEffect::Blocks},
+        // C's printf, to stdout, and eprintf, the same to stderr (runtime/Print.cpp), in every build: a format, a
+        // string literal checked as clang checks printf's (Print.cpp), and its values, each number passed as a double
+        // and each %s's string in two arrays (the _s functions), as a reply's are. The bytes written, or -1. The C
+        // library's stream may allocate its buffer and blocks while a pipe is full: they allocate, in the effects'
+        // terms, refused in a nonallocating or nonblocking function.
+        RuntimeBuiltin{"printf", "fminus_rt_printf", {Param::PrintFormat}, 1, RuntimeEffect::Allocates},
+        RuntimeBuiltin{"eprintf", "fminus_rt_eprintf", {Param::PrintFormat}, 1, RuntimeEffect::Allocates},
         // The JSON parser (runtime/Json.cpp), in a build with FMINUS_JSON. json_parse(data, bytes) gives a document, a
         // json_doc (null for a text that is no JSON, too large or nested too deeply), and json_free(doc) frees it: both
         // allocate. The reads take the document, a JSON Pointer with places for ints (a path, Paths.cpp) and its
@@ -370,6 +377,7 @@ namespace fminus::ir::detail
         case Param::Route:
         case Param::QueryName:
         case Param::ReplyFormat:
+        case Param::PrintFormat:
         case Param::FileName:
         case Param::FilePattern:
         case Param::HeaderName:
@@ -416,6 +424,7 @@ namespace fminus::ir::detail
         case Param::Route:
         case Param::QueryName:
         case Param::ReplyFormat:
+        case Param::PrintFormat:
         case Param::FileName:
         case Param::FilePattern:
         case Param::HeaderName:
@@ -558,6 +567,8 @@ namespace fminus::ir::detail
             FileWrite,     // fminus_rt_file_write, fminus_rt_file_append: reads a name literal, its ints and the bytes
             TextRead,      // fminus_rt_string_equal, _find, _float, _int (runtime/Text.cpp): reads strings' bytes
             TextCopy,      // fminus_rt_string_copy: reads a string's bytes, writes them into a char array
+            Print,         // fminus_rt_printf, _printf_s, _eprintf, _eprintf_s (runtime/Print.cpp): reads a format, its
+                           // values (and strings), writes a C library's stream
         };
 
         struct RuntimeFacts
@@ -661,6 +672,10 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_string_float", RuntimeKind::TextRead},
             RuntimeFacts{"fminus_rt_string_int", RuntimeKind::TextRead},
             RuntimeFacts{"fminus_rt_string_copy", RuntimeKind::TextCopy},
+            RuntimeFacts{"fminus_rt_printf", RuntimeKind::Print},
+            RuntimeFacts{"fminus_rt_printf_s", RuntimeKind::Print},
+            RuntimeFacts{"fminus_rt_eprintf", RuntimeKind::Print},
+            RuntimeFacts{"fminus_rt_eprintf_s", RuntimeKind::Print},
         };
 
         // The heap's allocator family, named after its first function as LangRef asks: LLVM pairs an allocation with
@@ -692,7 +707,8 @@ namespace fminus::ir::detail
             const llvm::Attribute keepsNone = llvm::Attribute::getWithCaptureInfo(context, llvm::CaptureInfo::none());
             function.setDoesNotThrow();
             if (facts->kind != RuntimeKind::Parallel && facts->kind != RuntimeKind::WebWait
-                && facts->kind != RuntimeKind::WebEnd && facts->kind != RuntimeKind::ServerWait)
+                && facts->kind != RuntimeKind::WebEnd && facts->kind != RuntimeKind::ServerWait
+                && facts->kind != RuntimeKind::Print)
                 function.setWillReturn();
             switch (facts->kind)
             {
@@ -1084,6 +1100,23 @@ namespace fminus::ir::detail
                     function.addParamAttr(arg, facts->kind == RuntimeKind::TextCopy && arg == 0
                                                    ? llvm::Attribute::WriteOnly
                                                    : llvm::Attribute::ReadOnly);
+                    function.addParamAttr(arg, keepsNone);
+                }
+                break;
+            case RuntimeKind::Print:
+                // Reads the format and the values (and, the _s functions, the strings' arrays, and their bytes through
+                // them: below), keeping no pointer to any, and writes the C library's stream, its buffer and its lock,
+                // which no pointer of the program reaches: inaccessible memory, and errno. The stream may allocate its
+                // buffer, so it is not nofree's to say; and a write to a full pipe waits for its reader, which may
+                // never read: not willreturn (above).
+                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)
+                                          | llvm::MemoryEffects::inaccessibleMemOnly()
+                                          | llvm::MemoryEffects::errnoMemOnly(llvm::ModRefInfo::ModRef));
+                for (unsigned arg = 0; arg < function.arg_size(); ++arg)
+                {
+                    if (!function.getArg(arg)->getType()->isPointerTy())
+                        continue;
+                    function.addParamAttr(arg, llvm::Attribute::ReadOnly);
                     function.addParamAttr(arg, keepsNone);
                 }
                 break;
@@ -1519,7 +1552,8 @@ namespace fminus::ir::detail
         const std::span<const Param> params(builtin.params.data(), builtin.arity);
         const auto format = std::ranges::find_if(params, [](Param param) {
             return param == Param::Format || param == Param::Path || param == Param::XmlPath || param == Param::Url
-                   || param == Param::ReplyFormat || param == Param::FileName || param == Param::FilePattern;
+                   || param == Param::ReplyFormat || param == Param::PrintFormat || param == Param::FileName
+                   || param == Param::FilePattern;
         });
         // A URL's ints and a file's name's are the call's last arguments, after every other parameter's, as printf's
         // are; any other format's follow it.
@@ -1631,7 +1665,8 @@ namespace fminus::ir::detail
             }
             if (param == Param::String || param == Param::Format || param == Param::Path || param == Param::XmlPath
                 || param == Param::Url || param == Param::ContentType || param == Param::Route
-                || param == Param::QueryName || param == Param::ReplyFormat || param == Param::FileName
+                || param == Param::QueryName || param == Param::ReplyFormat || param == Param::PrintFormat
+                || param == Param::FileName
                 || param == Param::FilePattern || param == Param::HeaderName)
             {
                 if (!isString(arg))
@@ -1733,10 +1768,12 @@ namespace fminus::ir::detail
                 std::vector<const ast::Expr*> given;
                 for (std::size_t k = 0; k < ints; ++k)
                     given.push_back(args[intsAt + k]);
-                if (param == Param::ReplyFormat)   // its values, doubles, and its strings (WebServer.cpp)
-                {
+                if (param == Param::ReplyFormat || param == Param::PrintFormat)   // its values, doubles, and its
+                {                                                                  // strings (WebServer.cpp, Print.cpp)
                     std::vector<llvm::Value*> strings;
-                    const std::optional<std::vector<llvm::Value*>> values = replyArguments(literal, given, strings);
+                    const std::optional<std::vector<llvm::Value*>> values =
+                        param == Param::ReplyFormat ? replyArguments(literal, given, strings)
+                                                    : printArguments(literal, given, strings);
                     if (!values)
                     {
                         fine = false;

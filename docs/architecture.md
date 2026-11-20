@@ -758,10 +758,12 @@ installed ([building.md](building.md), "Installing").
   when the module calls it, and, under `asan` or `tsan`, the sanitizer runtimes; it fails, naming where it looked, when
   either is missing.
 - **`emitExecutable(module, machine, options)`** combines the two through a temporary object file.
-- **`addEntryPoint(module)`** makes a program's `float main(float, ...)` or `bool main(float, ...)` the executable's
-  entry. C's entry is `int main(int, char**)`, so it renames the program's `main` to `fminus.main` (internal, so the
-  inliner can fold it) and adds a C `main` that reads the arguments through `fminus_rt_main_args`, calls it, and prints
-  the result through `fminus_rt_main_result` (or `fminus_rt_main_bool_result`, as `true` or `false`); a program with a
+- **`addEntryPoint(module)`** makes a program's `int`, `float`, `double` or `bool` `main` the executable's entry. C's
+  entry is `int main(int, char**)`, so it renames the program's `main` to `fminus.main` (internal, so the inliner can
+  fold it) and adds a C `main` that reads the arguments through `fminus_rt_main_args` (or `_double_args`, or
+  `_slot_args` for a main with an int or a string), calls it, and returns an int main's result as the exit status or
+  prints any other's through `fminus_rt_main_result` (or `_double_result`, or `_bool_result`, as `true` or `false`); a
+  program with a
   parallel region gets the runtime's pool around the call (`fminus_rt_parallel_start`, `_stop`). With a loop budget
   (`fminus --emit exe --loop-budget n`, for a module compiled with it) the C main is the host: it sets the program's
   budget before the call and, when main runs out of it, says so (`fminus_rt_main_loop_budget`) and exits with 3. With
@@ -781,7 +783,8 @@ generated code calls. It contains no LLVM, and it holds the FFT: PFFFT's objects
 
 - `Runtime.h` declares the functions as `extern "C"`: a placeholder ABI version, the command line and result of an
   executable (`fminus_rt_main_args`, `fminus_rt_main_result`, `fminus_rt_main_loop_budget` for one that ran past its
-  loop budget, and `fminus_rt_main_bounds` for one that failed a bounds check), and the heap that `malloc`, `calloc` and
+  loop budget, and `fminus_rt_main_bounds` for one that failed a bounds check), `printf` and `eprintf` (`Print.cpp`, the
+  text `Printf.h`'s, a header the web server's replies share), and the heap that `malloc`, `calloc` and
   `free` call (`fminus_rt_malloc`, `fminus_rt_calloc`, `fminus_rt_free`: 64-byte aligned, zeroed, on C's
   `aligned_alloc`, or on Windows, which has none, `_aligned_malloc`), the FFT behind the `fft_*` builtins
   (`fminus_rt_fft_create`, ..., `Fft.cpp`: a plan holds PFFFT's setup and buffers of its own, so a transform never
@@ -991,7 +994,7 @@ pivots, so the float code computes what the reference computes, operation for op
   effect is an error, C's strict aliasing is a little stricter (allocated memory keeps one type, `char` aliases nothing
   else, a vector is its elements' type), the math builtins' results are their math mode's (by default one result for a
   float wherever it is computed), subnormals are flushed if the host asks, threads are `parallel` regions, structured
-  and checked for what would race, and `main` returns a `float` or a `bool` and takes floats. As in C11 under clang, a
+  and checked for what would race, and `main` takes typed parameters, its `int` result the exit status. As in C11 under clang, a
   loop whose condition is not a constant may be assumed to end, and a heap block the program never uses may be removed.
 - **The runtime stays free of LLVM and real-time safe.** It runs inside the audio thread's call tree. The pool's
   `fminus_rt_parallel_for` is too: it waits for nothing but the chunks it handed out, never for the pool, and its

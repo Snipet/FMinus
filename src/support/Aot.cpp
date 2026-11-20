@@ -343,16 +343,25 @@ namespace fminus::aot
         const llvm::FunctionType* programType = program->getFunctionType();
         llvm::Type* resultType = programType->getReturnType();
         const bool printsBool = resultType->isIntegerTy(1);   // an FMinus bool
-        bool numbers = (resultType == floatType || resultType == doubleType || printsBool) && !programType->isVarArg();
+        const bool status = resultType->isIntegerTy(32);       // an FMinus int: the exit status, printed by no one
+        // FMinus's string, C's struct { const char* data; int size; } (ir/Types.cpp).
+        llvm::StructType* stringType =
+            llvm::StructType::get(context, {llvm::PointerType::getUnqual(context), llvm::Type::getInt32Ty(context)});
+        bool fits = (resultType == floatType || resultType == doubleType || printsBool || status)
+                    && !programType->isVarArg();
         bool doubles = false;   // a double parameter: the arguments are read as their types say
+        bool slots = false;     // an int or a string parameter: each read into a slot of 16 bytes, as its type says
         for (const llvm::Type* param : programType->params())
         {
-            numbers = numbers && (param == floatType || param == doubleType);
+            const bool text = param == stringType;
+            const bool integer = param->isIntegerTy(32);
+            fits = fits && (param == floatType || param == doubleType || integer || text);
             doubles = doubles || param == doubleType;
+            slots = slots || integer || text;
         }
-        if (!numbers)
-            return llvm::createStringError(
-                "'main' must return float, double or bool and take only float and double parameters");
+        if (!fits)
+            return llvm::createStringError("'main' must return int, float, double or bool and take only int, float, "
+                                           "double and string parameters");
         program->setName("fminus.main");
         program->setLinkage(llvm::GlobalValue::InternalLinkage);
 
@@ -368,47 +377,60 @@ namespace fminus::aot
         argc->setName("argc");
         argv->setName("argv");
         // A main of floats reads them as floats; one with a double among them reads each as its type says, into
-        // doubles (a float's widened, exactly), with the kinds in a string, "fd" for (float, double).
+        // doubles (a float's widened, exactly), with the kinds in a string, "fd" for (float, double); one with an int
+        // or a string among them reads each into a slot of 16 bytes, as its kind in the string says ('i' an int, 's'
+        // a string, a view of argv's bytes: Runtime.h).
         const llvm::FunctionCallee readArgs =
-            doubles ? module.getOrInsertFunction("fminus_rt_main_double_args", intType, intType, pointerType, intType,
-                                                 pointerType, pointerType)
-                    : module.getOrInsertFunction("fminus_rt_main_args", intType, intType, pointerType, intType,
-                                                 pointerType);
-        // A bool crosses the C ABI zero-extended, as FMinus's own bool parameters do (ir/CodeGen.cpp).
-        llvm::FunctionCallee printResult = module.getOrInsertFunction(
-            printsBool                  ? "fminus_rt_main_bool_result"
-            : resultType == doubleType ? "fminus_rt_main_double_result"
-                                       : "fminus_rt_main_result",
-            builder.getVoidTy(), resultType);
-        if (printsBool)
-            llvm::cast<llvm::Function>(printResult.getCallee())->addParamAttr(0, llvm::Attribute::ZExt);
+            slots     ? module.getOrInsertFunction("fminus_rt_main_slot_args", intType, intType, pointerType, intType,
+                                                   pointerType, pointerType)
+            : doubles ? module.getOrInsertFunction("fminus_rt_main_double_args", intType, intType, pointerType, intType,
+                                                   pointerType, pointerType)
+                      : module.getOrInsertFunction("fminus_rt_main_args", intType, intType, pointerType, intType,
+                                                   pointerType);
+        // A bool crosses the C ABI zero-extended, as FMinus's own bool parameters do (ir/CodeGen.cpp). An int is the
+        // exit status, which nothing prints.
+        std::optional<llvm::FunctionCallee> printResult;
+        if (!status)
+        {
+            printResult = module.getOrInsertFunction(printsBool                  ? "fminus_rt_main_bool_result"
+                                                     : resultType == doubleType ? "fminus_rt_main_double_result"
+                                                                                : "fminus_rt_main_result",
+                                                     builder.getVoidTy(), resultType);
+            if (printsBool)
+                llvm::cast<llvm::Function>(printResult->getCallee())->addParamAttr(0, llvm::Attribute::ZExt);
+        }
 
         llvm::BasicBlock* start = llvm::BasicBlock::Create(context, "entry", entry);
         llvm::BasicBlock* run = llvm::BasicBlock::Create(context, "run", entry);
         llvm::BasicBlock* usage = llvm::BasicBlock::Create(context, "usage", entry);
         builder.SetInsertPoint(start);
         const unsigned count = programType->getNumParams();
-        llvm::ArrayType* argsType = llvm::ArrayType::get(doubles ? doubleType : floatType, count);
+        llvm::Type* slotType = llvm::ArrayType::get(builder.getInt64Ty(), 2);   // 16 bytes, aligned to 8
+        llvm::ArrayType* argsType =
+            llvm::ArrayType::get(slots ? slotType : doubles ? doubleType : floatType, count);
         llvm::Value* args = builder.CreateAlloca(argsType, nullptr, "args");
         std::vector<llvm::Value*> readArgsArgs{argc, argv, builder.getInt32(count)};
-        if (doubles)
+        if (doubles || slots)
         {
             std::string kinds;
             for (const llvm::Type* param : programType->params())
-                kinds += param == doubleType ? 'd' : 'f';
+                kinds += param == doubleType ? 'd' : param == stringType ? 's' : param->isIntegerTy(32) ? 'i' : 'f';
             readArgsArgs.push_back(builder.CreateGlobalString(kinds, "main.kinds", 0, &module));
         }
         readArgsArgs.push_back(args);
-        llvm::Value* status = builder.CreateCall(readArgs, readArgsArgs, "status");
-        builder.CreateCondBr(builder.CreateICmpEQ(status, builder.getInt32(0)), run, usage);
+        llvm::Value* parsed = builder.CreateCall(readArgs, readArgsArgs, "status");
+        builder.CreateCondBr(builder.CreateICmpEQ(parsed, builder.getInt32(0)), run, usage);
 
         builder.SetInsertPoint(run);
         std::vector<llvm::Value*> values;
         for (unsigned i = 0; i < count; ++i)
         {
-            llvm::Value* value = builder.CreateLoad(argsType->getElementType(),
-                                                    builder.CreateConstInBoundsGEP2_32(argsType, args, 0, i));
-            if (doubles && programType->getParamType(i) == floatType)
+            llvm::Type* param = programType->getParamType(i);
+            llvm::Value* at = builder.CreateConstInBoundsGEP2_32(argsType, args, 0, i);
+            llvm::Value* value =
+                builder.CreateAlignedLoad(slots ? param : argsType->getElementType(), at,
+                                          llvm::Align(slots ? 8 : doubles ? 8 : 4));   // a slot holds its own type
+            if (!slots && doubles && param == floatType)
                 value = builder.CreateFPTrunc(value, floatType);   // exact: it was a float, widened
             values.push_back(value);
         }
@@ -526,13 +548,18 @@ namespace fminus::aot
             builder.CreateRet(builder.getInt32(3));
             builder.SetInsertPoint(within);
         }
-        llvm::CallInst* print = builder.CreateCall(printResult, {result});
-        if (printsBool)
-            print->addParamAttr(0, llvm::Attribute::ZExt);
-        builder.CreateRet(builder.getInt32(0));
+        if (status)   // int main: its result is the exit status, as C's is
+            builder.CreateRet(result);
+        else
+        {
+            llvm::CallInst* print = builder.CreateCall(*printResult, {result});
+            if (printsBool)
+                print->addParamAttr(0, llvm::Attribute::ZExt);
+            builder.CreateRet(builder.getInt32(0));
+        }
 
         builder.SetInsertPoint(usage);
-        builder.CreateRet(status);
+        builder.CreateRet(parsed);
 
         std::string problem;
         llvm::raw_string_ostream os(problem);

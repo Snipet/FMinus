@@ -43,10 +43,16 @@ On Windows, `-o note` writes `note.exe` (clang-cl, the linking driver there, add
 
 ## `main`
 
-A program's entry is a function named `main` that returns a `float`, a `double` or a `bool` and takes any number of
-`float` and `double` parameters, including none:
+A program's entry is a function named `main` that returns an `int`, a `float`, a `double` or a `bool` and takes any
+number of `int`, `float`, `double` and `string` parameters, including none:
 
 ```c
+int main(string name, int times)                              // ./greet world 2: two lines, and exit status 0
+{
+    for (int i = 0; i < times; ++i)
+        printf("hello, %s\n", name);                          // C's printf, below
+    return 0;
+}
 float main() { return 0.5f; }                                // ./prog prints 0.5
 float main(float a, float b) { return sqrtf(a * a + b * b); } // ./prog 3 4 prints 5
 bool main(float a, float b) { return a == b; }                // ./prog 2 2 prints true (examples/comparison/)
@@ -61,29 +67,31 @@ double main(double seconds, float rate)                       // ./prog 3600 480
 
 The executable:
 
-- **reads one command-line argument per parameter**, as C's `strtof` reads a float and `strtod` a double. Decimal and
-  hex floats, `inf` and `nan` are numbers; `C4` and `1.5x` are not.
+- **reads one command-line argument per parameter**, as C's `strtof` reads a float and `strtod` a double, an `int` as
+  decimal digits with an optional `-` that fit in 32 bits, and a `string` as the argument's own text, a view of its
+  bytes, which live as long as the process. Decimal and hex floats, `inf` and `nan` are numbers; `C4` and `1.5x` are
+  not, and neither `1.5` nor `3000000000` is an int;
 - **calls `main`** with them;
-- **prints its result** and a newline on stdout, as `fminus --run` prints a result: a float as the shortest decimal
-  that reads back as the same float (`0.6666667`, `440`, `inf`), a double as the shortest that reads back as the same
-  double (`0.6666666666666666`), a `bool` as `true` or `false`;
-- **exits with 0**, or with **2** after a message on stderr when the arguments are wrong: too few, too many, or one
-  that is not a number. (`fminus` itself exits with 1 when a program doesn't compile.)
+- for an `int main`, **exits with its result**, C's exit status, and prints nothing;
+- for any other, **prints its result** and a newline on stdout, as `fminus --run` prints a result: a float as the
+  shortest decimal that reads back as the same float (`0.6666667`, `440`, `inf`), a double as the shortest that reads
+  back as the same double (`0.6666666666666666`), a `bool` as `true` or `false`; and **exits with 0**;
+- exits with **2** after a message on stderr when the arguments are wrong: too few, too many, or one that is not a
+  number or an int. (`fminus` itself exits with 1 when a program doesn't compile.)
 
-This is where FMinus departs from C. C's `main` returns an `int`, the exit status, takes `argc` and `argv`, and
-prints through `printf`. FMinus has no I/O (and its strings are read-only views), so the executable does the command
-line and the printing for it, and `main` stays a plain function over floats. It has `int` and pointers now
-(extending.md, recipe 10), and `char` as an array's element (recipe 46), but `argv` is a `char**`, which needs pointers
-to pointers, so C's `int main(int argc, char** argv)` waits for
-them ("Where to go next").
+This is where FMinus departs from C. C's `main` takes `argc` and `argv`, a `char**`, which needs pointers to pointers;
+FMinus's takes typed parameters instead, which the executable reads from the command line for it, with its usage
+message (`./greet: 'main' takes 2 arguments, not 1`). An `int main` returns the exit status as C's does, and prints
+through `printf` (below); a `main` of another type prints its result, as it always has. A program that takes any number
+of arguments is the one C's way covers and this does not ([research/data/](research/data/README.md), §4.1).
 
 `main` is otherwise an ordinary function:
 
 - other functions may call it;
 - `fminus --run main ...` calls it in the JIT, as any function. `--run` reads each argument as its parameter's type,
-  a `bool`, `int`, `float` or `double` in any mix (or an array, `1,2,3`, for a pointer), and prints a `float`,
-  `double`, `bool` or `int` result, through the thunk a host's `Program::call` uses
-  ([extending.md](extending.md), recipe 36);
+  a `bool`, `int`, `float`, `double` or `string` in any mix (or an array, `1,2,3`, for a pointer), and prints a
+  `float`, `double`, `bool` or `int` result (an `int main`'s too), through the thunk a host's `Program::call` uses
+  ([extending.md](extending.md), recipe 36), after whatever the call printed;
 - a host program finds it with `jit->lookup("main")`, as `float (*)(float)` or `bool (*)(float, float)`;
 - a program without one compiles, runs in the JIT, and emits IR, assembly and objects as before. Only an executable
   needs it.
@@ -91,11 +99,51 @@ them ("Where to go next").
 | Problem | Message |
 |---|---|
 | an executable (`-o prog`, `--emit exe`) and no `main` (or only a prototype) | fminus: an executable needs a main function, such as float main(float x) |
-| a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` | fminus: 'main' must return float, double or bool and take only float and double parameters |
-| `--run` of a function with a `float4` parameter | fminus: --run: 'f' takes a parameter of type 'float4'; --run passes bools, ints, floats, doubles and arrays of ints, floats and doubles only |
+| a `main` with another type, such as `float main(bool b)` or `float main(float4 v)` | fminus: 'main' must return int, float, double or bool and take only int, float, double and string parameters |
+| `./prog three` of `int main(int n)` | ./prog: 'three' is not an int |
+| `--run` of a function with a `float4` parameter | fminus: --run: 'f' takes a parameter of type 'float4'; --run passes bools, ints, floats, doubles, strings and arrays of ints, floats and doubles only |
 | `--run f 1.5` of `float f(int n)` | fminus: --run: '1.5' is not an int |
 | `--emit exe` without `-o` | fminus: --emit exe: an executable needs a file name (-o) |
 | no C++ toolchain where `fminus` looks | fminus: linkExecutable: no C++ compiler to link with: tried /usr/bin/clang++ (the compiler FMinus was built with), c++ (on PATH), clang++ (on PATH). ... |
+
+## Printing: `printf` and `eprintf`
+
+`printf` is C's, to stdout, and `eprintf` the same to stderr (C would write `fprintf(stderr, ...)`, which needs
+`<stdio.h>`'s `FILE*`):
+
+```c
+printf("epoch %3d  loss %.4f\n", epoch, loss);
+printf("[%-8s][%8.3e][%+d][%05d][%.2s]\n", name, x, n, n, name);
+eprintf("data/%s.csv: no rows\n", name);
+```
+
+- **The format is a string literal**, checked where it is written as clang checks `printf`'s, its mistakes errors
+  (clang's warnings): `%d` and `%i` an `int` (a `bool` or an enumeration's value, which C promotes to one); `%f`, `%e`
+  and `%g` a `float` or a `double` (C promotes a float to a double); `%s` a `string` (a literal among them); `%%` a
+  percent sign. Each with C's flags `-`, `+`, ` ` and `0`, a width of at most 999 and a precision of at most 99. No
+  length modifier (FMinus has no `long` or `short`), no `*`, no `#`, and no `%x`, `%c` or `%p`.
+- **The text is C's**, every digit FMinus's own in no locale: `std::to_chars`'s formats with a precision are `printf`'s
+  `%f`, `%e` and `%g`, so the same program prints the same bytes on every machine. `tests/unit/PrintfTest.cpp` checks
+  it against the C library's own `snprintf`.
+- **The result is C's**: the bytes written, or -1. A call's text is written under the stream's lock, so two calls from
+  a `parallel for`'s iterations never interleave, as POSIX promises of C's `printf`.
+- **The streams are the C library's**, buffered as C buffers them (a line at a time to a terminal, in blocks to a pipe
+  or a file; stderr not at all) and flushed when the process exits, so an executable's text and a printed result come
+  out in the order the program made them. `fminus --run` flushes stdout after the call, before it prints the result.
+- **Effects**: a stream may allocate its buffer and blocks while a pipe is full, so both allocate, in the effects'
+  terms: refused in a `[[clang::nonallocating]]` or `[[clang::nonblocking]]` function. Inside a plugin, nothing on the
+  audio thread prints.
+- **Every build has them**; a host's program writes to the process's own stdout and stderr (from Python, the C streams,
+  not `sys.stdout`).
+
+| Problem | Message |
+|---|---|
+| a conversion FMinus's printf lacks: `printf("%x", n)` | invalid conversion specifier 'x', with a note of what printf takes |
+| a value of the wrong type: `printf("%d", 1.5f)` | format specifies type 'int' but the argument has type 'float' |
+| too few or too many values | more '%' conversions than data arguments; data argument not used by format string |
+| `printf("%ld", n)`, `printf("%*d", w, n)`, `printf("%#g", x)` | length modifier 'l' is not printf's in FMinus: ...; a width or a precision of '*' ...; flag '#' ... |
+| a format that is not a literal: `printf(s)` | argument to 'printf' must be a string literal |
+| `printf` in a `[[clang::nonblocking]]` function | the effects' error for a call that allocates |
 
 ## The commands
 
@@ -148,8 +196,9 @@ printing a result.
 
 ## How an executable gets its entry
 
-C's entry point is `int main(int argc, char** argv)`. FMinus's `main` is `float main(float, ...)`, `double main(...)` or
-`bool main(...)`, its parameters floats and doubles, under the same name. So before the module is optimised,
+C's entry point is `int main(int argc, char** argv)`. FMinus's `main` is `int main(...)`, `float main(...)`,
+`double main(...)` or `bool main(...)`, its parameters ints, floats, doubles and strings, under the same name. So
+before the module is optimised,
 `fminus::aot::addEntryPoint` (`src/support/Aot.h`) does three things:
 
 1. **It renames the program's `main` to `fminus.main`** and gives it internal linkage. No FMinus function can have
@@ -186,8 +235,8 @@ usage:
 
 3. **It verifies the new function**, and refuses a module without a `main` definition or with a `main` of another
    type. The check is on the LLVM function's type, so it covers every type the language gains: a result must be
-   `float`, `double` or `i1` (a `bool`), and every parameter `float` or `double`, so a `float4` (`<4 x float>`) is
-   refused wherever it is.
+   `i32` (an `int`), `float`, `double` or `i1` (a `bool`), and every parameter `i32`, `float`, `double` or `{ ptr, i32
+   }` (a `string`), so a `float4` (`<4 x float>`) is refused wherever it is.
 
 For a `bool main`, the result goes to `fminus_rt_main_bool_result` instead, declared and called with `zeroext` on its
 parameter: the C ABI passes a `bool` zero-extended, as FMinus's own `bool` parameters are (extending.md, recipe 3).
@@ -215,6 +264,27 @@ prints through `fminus_rt_main_double_result`. A `main` of floats keeps `fminus_
   call void @fminus_rt_main_double_result(double %result)
 ```
 
+A `main` with an `int` or a `string` among its parameters reads each into a slot of 16 bytes, as its kind in the string
+says (`i` an int, `s` a string, `f` and `d` as above), through `fminus_rt_main_slot_args`, and the entry loads each
+slot as its parameter's type: a string's slot holds the argument's address and its length, laid out as FMinus lays out
+a `string`. An `int main` prints nothing: the C `main` returns its result, the exit status.
+
+```llvm
+; fminus greet.fm --entry -O0 (int main(string name, int times))
+@main.kinds = private unnamed_addr constant [3 x i8] c"si\00", align 1
+  ...
+  %args = alloca [2 x [2 x i64]], align 8
+  %status = call i32 @fminus_rt_main_slot_args(i32 %argc, ptr %argv, i32 2, ptr @main.kinds, ptr %args)
+  ...
+run:
+  %1 = getelementptr inbounds [2 x [2 x i64]], ptr %args, i32 0, i32 0
+  %2 = load { ptr, i32 }, ptr %1, align 8
+  %3 = getelementptr inbounds [2 x [2 x i64]], ptr %args, i32 0, i32 1
+  %4 = load i32, ptr %3, align 8
+  %result = call i32 @fminus.main({ ptr, i32 } %2, i32 %4)
+  ret i32 %result
+```
+
 The runtime functions are in `src/runtime/Runtime.cpp`, so they are in `libfminus_runtime.a`, which every executable
 links:
 
@@ -230,6 +300,11 @@ links:
     std::int32_t fminus_rt_main_double_args(std::int32_t argc, char** argv, std::int32_t count, const char* kinds,
                                             double* args) noexcept;
 
+    // The same for a main with an int or a string among its parameters: reads each into a slot of 16 bytes at
+    // `slots`, as `kinds` says ('f', 'd', 'i' an int, 's' a string: the argument's address and its length).
+    std::int32_t fminus_rt_main_slot_args(std::int32_t argc, char** argv, std::int32_t count, const char* kinds,
+                                          void* slots) noexcept;
+
     // An executable's end: prints main's result and a newline on stdout as `fminus --run` prints a result, the
     // shortest decimal that reads back as the same float.
     void fminus_rt_main_result(float result) noexcept;
@@ -243,7 +318,7 @@ links:
 
 `fminus_rt_main_result` and `fminus_rt_main_double_result` write with `std::to_chars` into a buffer on the stack: no
 allocation, no exceptions, and the same digits as the driver's `std::format("{}")`, which prints a `bool` as `true` or
-`false` too. All five are listed in `RuntimeSymbols.def` like every runtime function, although only executables call
+`false` too. All six are listed in `RuntimeSymbols.def` like every runtime function, although only executables call
 them.
 
 The order in the driver matters. The entry is added **before** `prepareModule` and `optimiseModule`, so the pipeline
@@ -392,12 +467,9 @@ is for a program that runs on its own.
 
 ## Where to go next
 
-- **Printing.** A runtime function `fminus_rt_print(float x)` that writes `x` and returns it, made a builtin `print`
-  (recipe 5's pattern), would let a program trace values in a loop. It belongs to executables and debugging: inside a
-  plugin, nothing on the audio thread may write to a stream.
-- **An exit status.** With `int` (recipe 10), `int main(...)` could return the status as C does: `addEntryPoint`
-  would return the result from C's `main` instead of printing it.
-- **Strings and buffers.** With `char` and pointers to pointers, `main` could take C's `argc` and `argv`, and runtime
-  functions could read and write audio files into buffers (recipe 10's pointers), so an FMinus program processes a
-  file from the command line.
+- **Any number of arguments.** `main`'s parameters are typed and counted; a tool that takes a list of files needs
+  `arg_count()` and `arg(i)`, or C's `argv` once FMinus has pointers to pointers.
+- **Text a program builds**: C's `snprintf` into a `char` array, the array the sink, as a reply's buffer is
+  ([research/data/](research/data/README.md), §11).
+- **Tables**: the rest of the data plan, CSV in and out ([research/data/](research/data/README.md)).
 - **Debug information**, so lldb shows FMinus source.

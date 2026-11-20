@@ -101,6 +101,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -189,11 +190,13 @@ namespace
         bool started;
     };
 
-    // --run's argument for a parameter: a scalar in its slot, or an array the call points to, its elements as the
-    // parameter's type has them (each 4 or 8 bytes, in storage aligned to 8).
+    // --run's argument for a parameter: a scalar in its slot, an array the call points to, its elements as the
+    // parameter's type has them (each 4 or 8 bytes, in storage aligned to 8), or a string, a view of the command
+    // line's own text, whose address the slot holds.
     struct RunArgument
     {
         fminus::jit::CallSlot slot;
+        fminus::jit::CallString text;
         fminus::ast::Kind element = fminus::ast::Kind::Void;   // an array's elements' type
         std::size_t count = 0;                                  // and how many it has
         std::vector<std::uint64_t> storage;
@@ -243,8 +246,8 @@ namespace
         }
     }
 
-    // Whether --run passes `type`: a bool, an int, a float or a double, or a pointer to an int, a float or a double (an
-    // array), as a thunk passes them (jit::callType, whose switch over FMinus's types makes a new type say how it
+    // Whether --run passes `type`: a bool, an int, a float, a double or a string, or a pointer to an int, a float or a
+    // double (an array), as a thunk passes them (jit::callType, whose switch over FMinus's types makes a new type say how it
     // crosses).
     bool runPasses(const fminus::ast::Type& type)
     {
@@ -1139,11 +1142,12 @@ int main(int argc, char** argv)
         {
             if (!runPasses(param.type))
                 return fail(std::format("--run: '{}' takes a parameter of type '{}'; --run passes bools, ints, floats, "
-                                        "doubles and arrays of ints, floats and doubles only",
+                                        "doubles, strings and arrays of ints, floats and doubles only",
                                         run, fminus::ast::typeName(param.type)));
         }
         const std::optional<fminus::jit::CallType> result = fminus::jit::callType(function->returnType);
-        if (!result || *result == fminus::jit::CallType::Pointer)   // a vector stays inside FMinus, or goes to a C++
+        if (!result || *result == fminus::jit::CallType::Pointer   // a vector stays inside FMinus, or goes to a C++
+            || *result == fminus::jit::CallType::String)
             return fail(std::format("--run: '{}' returns '{}'; --run prints bools, ints, floats and doubles only",
                                     run, fminus::ast::typeName(function->returnType)));   // host (docs/simd.md)
         // Each argument read as its parameter's type, as CLI11 reads a number of that type; an array's elements each
@@ -1155,6 +1159,12 @@ int main(int argc, char** argv)
             const fminus::ast::Type type = function->params[i].type;
             RunArgument& argument = arguments[i];
             parameters.push_back(*fminus::jit::callType(type));
+            if (type == fminus::ast::Type::String)   // the text as given: runArgs outlives the call
+            {
+                argument.text = {runArgs[i].data(), static_cast<std::int32_t>(runArgs[i].size())};
+                argument.slot = fminus::jit::CallSlot::of(&argument.text);
+                continue;
+            }
             if (!fminus::ast::isPointer(type))
             {
                 if (!readScalar(runArgs[i], type.kind, argument.slot.bytes))
@@ -1263,6 +1273,7 @@ int main(int argc, char** argv)
             slots.push_back(argument.slot);
         fminus::jit::CallSlot out;
         (*thunk)(slots.data(), &out);
+        std::fflush(stdout);   // what the call printf'd, before what --run prints (llvm::outs() buffers on its own)
         switch (*result)
         {
         case fminus::jit::CallType::Float:
@@ -1279,6 +1290,7 @@ int main(int argc, char** argv)
             break;
         case fminus::jit::CallType::Void:
         case fminus::jit::CallType::Pointer:   // refused above
+        case fminus::jit::CallType::String:
             break;
         }
         for (std::size_t i = 0; i < arguments.size(); ++i)

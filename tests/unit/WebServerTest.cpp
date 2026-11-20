@@ -800,7 +800,8 @@ TEST_CASE("a format the library trusts no byte of: stray percents, missing value
 {
     std::mutex mutex;
     // %r, %R and %b were a JSON literal's, which the JSON writer writes now: each is itself, as %s is here (only
-    // fminus_web_http_reply_text_s fills a %s).
+    // fminus_web_http_reply_text_s fills a %s). %.g is C's %g with a precision of 0, which %g takes as 1: the text is
+    // printf's formatter's (runtime/Printf.h), though a reply's format, checked when compiled, never holds one.
     std::vector<std::string> formats = {"%", "a%", "%x%q", "%d %g %.5g", "%.g", "%.123g", "%.5", "%%%d", "%r%R%b%s %d"};
     std::vector<std::vector<double>> values = {{}, {}, {}, {1.0}, {2.0}, {3.0}, {}, {std::nan(""), 1.0}, {4.0}};
     std::size_t next = 0;
@@ -810,7 +811,7 @@ TEST_CASE("a format the library trusts no byte of: stray percents, missing value
         ++next;
     });
     auto client = clientFor(served.port);
-    const std::vector<std::string> expected = {"%", "a%", "%x%q", "1  ", "%.g", "%.123g", "%.5", "%0", "%r%R%b%s 4"};
+    const std::vector<std::string> expected = {"%", "a%", "%x%q", "1  ", "2", "%.123g", "%.5", "%0", "%r%R%b%s 4"};
     for (std::size_t i = 0; i < formats.size(); ++i)
     {
         void* request = clientGet(*client, served.port, "/hello");

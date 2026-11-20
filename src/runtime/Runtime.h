@@ -63,8 +63,18 @@ extern "C"
     std::int32_t fminus_rt_main_double_args(std::int32_t argc, char** argv, std::int32_t count, const char* kinds,
                                             double* args) noexcept;
 
+    // The same for a main with an int or a string among its parameters: reads each of its `count` arguments as
+    // `kinds` says, a character a parameter, into a slot of 16 bytes at `slots`, aligned to 8: 'f' a float as strtof
+    // reads one, 'd' a double as strtod does, 'i' an int, decimal digits with an optional '-' that fit in 32 bits, at
+    // the slot's start; 's' a string, the argument itself, its address at the slot's start and its length (strlen's)
+    // after it at byte 8, as FMinus lays out a string (C's struct { const char* data; int size; }), a view of argv's
+    // bytes, which live as long as the process. Or tells stderr what is wrong and returns 2.
+    std::int32_t fminus_rt_main_slot_args(std::int32_t argc, char** argv, std::int32_t count, const char* kinds,
+                                          void* slots) noexcept;
+
     // An executable's end: prints main's result and a newline on stdout as `fminus --run` prints a result, the
-    // shortest decimal that reads back as the same float.
+    // shortest decimal that reads back as the same float. (A main that returns an int prints nothing: the int is the
+    // executable's exit status.)
     void fminus_rt_main_result(float result) noexcept;
 
     // The same for a main that returns double: the shortest decimal that reads back as the same double.
@@ -152,6 +162,22 @@ extern "C"
     float fminus_rt_string_float(const char* s, std::int32_t n, float fallback) noexcept;
     std::int32_t fminus_rt_string_int(const char* s, std::int32_t n, std::int32_t fallback) noexcept;
     std::int32_t fminus_rt_string_copy(char* out, std::int32_t cap, const char* s, std::int32_t n) noexcept;
+
+    // printf and eprintf (Print.cpp, in every build), C's printf to stdout and to stderr: the text the format (`length`
+    // bytes at `format`, checked by the code generator: ir/Print.cpp) makes with `count` values at `values` (each a
+    // double: an int's converted exactly, a float's widened), and, for the _s functions, its strings, the i-th the
+    // lengths[i] bytes at data[i] (Printf.h has the rules), written under the stream's lock, so two calls' texts never
+    // interleave. The bytes written, or -1 when the stream took fewer. They read their arguments (and the _s functions
+    // the strings' bytes, through the arrays), keep no pointer to any, and write the C library's stream, which may
+    // allocate its buffer, and blocks while a pipe is full.
+    std::int32_t fminus_rt_printf(const char* format, std::int32_t length, const double* values,
+                                  std::int32_t count) noexcept;
+    std::int32_t fminus_rt_printf_s(const char* format, std::int32_t length, const double* values, std::int32_t count,
+                                    const char* const* data, const std::int32_t* lengths, std::int32_t texts) noexcept;
+    std::int32_t fminus_rt_eprintf(const char* format, std::int32_t length, const double* values,
+                                   std::int32_t count) noexcept;
+    std::int32_t fminus_rt_eprintf_s(const char* format, std::int32_t length, const double* values, std::int32_t count,
+                                     const char* const* data, const std::int32_t* lengths, std::int32_t texts) noexcept;
 
 #if FMINUS_HAS_JSON
     // The JSON parser (Json.cpp, on yyjson; a build with FMINUS_JSON only), for FMinus's json_* builtins.

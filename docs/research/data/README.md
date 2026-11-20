@@ -1,5 +1,12 @@
 # Offline data: tabular files and primitive machine learning
 
+*Step 1 built since (2026-11-20): `int main`, its `int` and `string` parameters, and `printf` and `eprintf`
+([programs.md](../../programs.md), "`main`" and "Printing"; [extending.md](../../extending.md), recipe 52). What it
+changed of §4: printf and eprintf allocate, in the effects' terms (a C stream may allocate its buffer), so they are
+refused in a nonallocating function too, not only a nonblocking one; `main` takes `int` parameters as well as strings;
+and the formatter is a header of the runtime's (`src/runtime/Printf.h`) that the web server's replies use too. The
+note is left as it was written; where the two differ, the manual is right.*
+
 *Plan, 2026-11-20, written against FMinus at `5358de8`. The question asked: propose an initial plan for offline data
 processing in FMinus, chiefly reading tabular files and running primitive machine learning on them efficiently, as part
 of moving FMinus from a language for DSP to a personal programming language for whole projects. Nothing under `src/`,

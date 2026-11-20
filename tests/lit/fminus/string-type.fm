@@ -1,10 +1,12 @@
 // The type string, {ptr, i32}: a parameter and a result as that pair, in memory its two members each loaded with its
 // own tag (a pointer's and an int's), == a call of the runtime's comparison, a switch on a string a chain of them,
 // string_size of a literal a constant, string_slice inline. A char array's element a byte, tagged as a char of its own,
-// widened to an int from 0 to 255, and a store of its low 8 bits. --run passes no string. Then the errors, each once.
+// widened to an int from 0 to 255, and a store of its low 8 bits. --run passes a string, its argument's text. Then the
+// errors, each once.
 // RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - -O0 | FileCheck %s
 // RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - | FileCheck %s --check-prefix=OPT
-// RUN: sed '/^\/\/ ERRORS$/,$d' %s | not fminus - --run pick 0 2>&1 | FileCheck %s --check-prefix=RUNS
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - --run pick saw | FileCheck %s --check-prefix=RUNS
+// RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - --run pick sine | FileCheck %s --check-prefix=RUNSNOT
 // RUN: sed '/^\/\/ ERRORS$/,$d' %s | fminus - --run sized | FileCheck %s --check-prefix=SIZED
 // RUN: sed -n '/^\/\/ ERRORS$/,$p' %s | not fminus - 2>&1 | FileCheck %s --check-prefix=ERR --implicit-check-not=error:
 
@@ -104,7 +106,8 @@ int sized() { return string_size(tail("abc")) + pick(tail("xsaw")) * 10; }
 // CHECK: [[CHAR]] = !{[[CHARTYPE:![0-9]+]], [[CHARTYPE]], i64 0}
 // CHECK: [[CHARTYPE]] = !{!"char", {{![0-9]+}}, i64 0}
 
-// RUNS: fminus: --run: 'pick' takes a parameter of type 'string'; --run passes bools, ints, floats, doubles and arrays of ints, floats and doubles only
+// RUNS: 1
+// RUNSNOT: 0
 // SIZED: 12
 
 // ERRORS

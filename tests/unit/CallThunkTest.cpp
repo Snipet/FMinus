@@ -105,6 +105,36 @@ TEST_CASE("call thunks: each type in its slot, and the result in its own", "[jit
     CHECK(fminus::jit::thunkName("Osc::tick") == "fminus.call.Osc::tick");
 }
 
+TEST_CASE("call thunks: a string through the address of its view, its bytes the caller's", "[jit][call]")
+{
+    auto jit = fminus::test::compile("int measure(string s, int k) { return string_size(s) * 10 + string_byte(s, k); }\n"
+                                     "bool same(string a, string b) { return a == b; }\n");
+    REQUIRE(jit != nullptr);
+    const auto measure = thunkOf(*jit, "measure", CallType::Int, {CallType::String, CallType::Int});
+    const char text[] = "abc";
+    const fminus::jit::CallString view{text, 3};
+    CallSlot out;
+    const CallSlot args[2] = {CallSlot::of(&view), CallSlot::of(std::int32_t{1})};
+    measure(args, &out);
+    CHECK(out.as<std::int32_t>() == 3 * 10 + 'b');
+    const fminus::jit::CallString empty{};
+    const CallSlot none[2] = {CallSlot::of(&empty), CallSlot::of(std::int32_t{0})};
+    measure(none, &out);
+    CHECK(out.as<std::int32_t>() == -1);   // the empty string: no byte 0, so string_byte is -1
+
+    const auto same = thunkOf(*jit, "same", CallType::Bool, {CallType::String, CallType::String});
+    const char other[] = "abcd";
+    const fminus::jit::CallString prefix{other, 3};
+    const CallSlot pair[2] = {CallSlot::of(&view), CallSlot::of(&prefix)};
+    same(pair, &out);
+    CHECK(out.as<std::uint8_t>() == 1);   // by content: "abc" and the first three of "abcd"
+
+    // A string is a parameter's type only.
+    auto refused = fminus::jit::callThunk(*jit, "same", CallType::String, {CallType::String, CallType::String});
+    CHECK_FALSE(static_cast<bool>(refused));
+    llvm::consumeError(refused.takeError());
+}
+
 TEST_CASE("call thunks: callType maps FMinus's types to what a thunk passes", "[jit][call]")
 {
     using fminus::ast::Kind;
@@ -117,6 +147,7 @@ TEST_CASE("call thunks: callType maps FMinus's types to what a thunk passes", "[
     CHECK(callType(Type(Kind::Double)) == CallType::Double);
     CHECK(callType(Type::pointerTo(Type(Kind::Float), true)) == CallType::Pointer);
     CHECK(callType(Type::pointerTo(Type(Kind::Float4), false)) == CallType::Pointer);
+    CHECK(callType(Type::String) == CallType::String);
     CHECK_FALSE(callType(Type(Kind::Float4)).has_value());
     CHECK_FALSE(callType(Type(Kind::PolyFloat)).has_value());
     CHECK_FALSE(callType(Type(Kind::Bool8)).has_value());

@@ -62,6 +62,67 @@ extern "C" std::int32_t fminus_rt_main_double_args(std::int32_t argc, char** arg
     return 0;
 }
 
+extern "C" std::int32_t fminus_rt_main_slot_args(std::int32_t argc, char** argv, std::int32_t count,
+                                                 const char* kinds, void* slots) noexcept
+{
+    const char* program = argc > 0 ? argv[0] : "fminus";
+    if (argc - 1 != count)
+    {
+        std::fprintf(stderr, "%s: 'main' takes %d argument%s, not %d\n", program, count, count == 1 ? "" : "s",
+                     argc - 1);
+        return 2;
+    }
+    auto* bytes = static_cast<unsigned char*>(slots);
+    for (std::int32_t i = 0; i < count; ++i)
+    {
+        const char* text = argv[i + 1];
+        unsigned char* slot = bytes + 16 * static_cast<std::size_t>(i);
+        if (kinds[i] == 's')   // the text itself: a view of argv's bytes
+        {
+            const std::size_t length = std::strlen(text);
+            if (length > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+            {
+                std::fprintf(stderr, "%s: an argument of %zu bytes is longer than a string holds\n", program, length);
+                return 2;
+            }
+            const auto size = static_cast<std::int32_t>(length);
+            std::memcpy(slot, &text, sizeof text);
+            std::memcpy(slot + 8, &size, sizeof size);
+            continue;
+        }
+        if (kinds[i] == 'i')   // decimal digits, a '-' before them or not, that fit in an int
+        {
+            std::int32_t value = 0;
+            const char* end = text + std::strlen(text);
+            const std::from_chars_result read = std::from_chars(text, end, value);
+            if (read.ec != std::errc() || read.ptr != end || end == text)
+            {
+                std::fprintf(stderr, "%s: '%s' is not an int\n", program, text);
+                return 2;
+            }
+            std::memcpy(slot, &value, sizeof value);
+            continue;
+        }
+        char* end = nullptr;
+        if (kinds[i] == 'd')
+        {
+            const double value = std::strtod(text, &end);
+            std::memcpy(slot, &value, sizeof value);
+        }
+        else
+        {
+            const float value = std::strtof(text, &end);
+            std::memcpy(slot, &value, sizeof value);
+        }
+        if (end == text || *end != '\0')
+        {
+            std::fprintf(stderr, "%s: '%s' is not a number\n", program, text);
+            return 2;
+        }
+    }
+    return 0;
+}
+
 extern "C" void fminus_rt_main_result(float result) noexcept
 {
     char text[32];   // the longest float, -1.17549435e-38, is 15 characters

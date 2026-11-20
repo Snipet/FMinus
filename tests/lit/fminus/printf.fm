@@ -1,0 +1,76 @@
+// printf and eprintf, C's printf to stdout and to stderr (src/ir/Print.cpp; the text runtime/Printf.h's), from the JIT
+// and from an executable; an int main, whose result is the exit status and which prints nothing; and main's string and
+// int parameters, each argument's text and its decimal digits (src/support/Aot.cpp).
+// RUN: fminus %s --run report hello 3 2>%t.jit.err | FileCheck %s --check-prefix=OUT --match-full-lines --strict-whitespace
+// RUN: FileCheck %s --check-prefix=ERR --input-file=%t.jit.err --match-full-lines
+// RUN: fminus %s --emit exe -o %t
+// RUN: %t hello 0 > %t.out 2> %t.err
+// RUN: FileCheck %s --check-prefix=MAIN --input-file=%t.out --match-full-lines --strict-whitespace
+// RUN: FileCheck %s --check-prefix=MAINERR --input-file=%t.err --match-full-lines
+// RUN: not %t hello 3 | FileCheck %s --check-prefix=STATUS
+// RUN: not %t hello three 2>&1 | FileCheck %s --check-prefix=NOTINT
+// RUN: not %t hello 3000000000 2>&1 | FileCheck %s --check-prefix=NOTINT2
+// RUN: not %t hello 2>&1 | FileCheck %s --check-prefix=ARITY
+// RUN: %t "two words, and %d" 0 | FileCheck %s --check-prefix=TEXT --match-full-lines --strict-whitespace
+// RUN: fminus %s --run main hello 0 | FileCheck %s --check-prefix=RUNMAIN --match-full-lines
+// RUN: fminus %s --entry -O0 | FileCheck %s --check-prefix=IR
+
+enum Wave { SAW, SQUARE };
+
+// Every kind of place, from a function the driver calls by name: its printed lines, then its result.
+int report(string name, int n)
+{
+    const float x = 0.1f;
+    const double third = 1.0 / 3.0;
+    printf("%s has %d\n", name, n);
+    printf("[%5d][%-5d][%05d][%+d][% d][%.3d]\n", n, n, n, n, n, n);
+    printf("[%f][%.2f][%e][%g][%.10g]\n", x, third, third, third, third);
+    printf("[%8.3f][%-8.2e|][%+.1f][%08.2f]\n", third, third, -third, -third);
+    printf("[%s][%8s][%-8s][%.3s]\n", "lit", name, name, name);
+    printf("%d %d %d%%\n", true, SQUARE, 100);
+    const int written = printf("%s\n", name);
+    printf("printf wrote %d bytes\n", written);
+    eprintf("to stderr: %s, %d\n", name, n);
+    return n * 2;
+}
+
+int main(string name, int status)
+{
+    printf("%s from main\n", name);
+    eprintf("%d to stderr\n", status);
+    return status;
+}
+
+// OUT:hello has 3
+// OUT-NEXT:[    3][3    ][00003][+3][ 3][003]
+// OUT-NEXT:[0.100000][0.33][3.333333e-01][0.333333][0.3333333333]
+// OUT-NEXT:[   0.333][3.33e-01|][-0.3][-0000.33]
+// OUT-NEXT:[lit][   hello][hello   ][hel]
+// OUT-NEXT:1 1 100%
+// OUT-NEXT:hello
+// OUT-NEXT:printf wrote 6 bytes
+// OUT-NEXT:6
+// ERR:to stderr: hello, 3
+
+// MAIN:hello from main
+// MAINERR:0 to stderr
+// STATUS: hello from main
+// NOTINT: 'three' is not an int
+// NOTINT2: '3000000000' is not an int
+// ARITY: 'main' takes 2 arguments, not 1
+// TEXT:two words, and %d from main
+// RUNMAIN:hello from main
+// RUNMAIN-NEXT:0
+
+// The C main reads each argument into a slot as its kind says, a string and an int, and returns main's result.
+// IR:       @main.kinds = private unnamed_addr constant [3 x i8] c"si\00"
+// IR:       define internal i32 @fminus.main({ ptr, i32 } %name, i32 %status)
+// IR-LABEL: define i32 @main(i32 %argc, ptr %argv)
+// IR:         %args = alloca [2 x [2 x i64]]
+// IR:         %status = call i32 @fminus_rt_main_slot_args(i32 %argc, ptr %argv, i32 2, ptr @main.kinds, ptr %args)
+// IR:       run:
+// IR:         [[NAME:%.*]] = load { ptr, i32 }, ptr
+// IR:         [[N:%.*]] = load i32, ptr
+// IR:         %result = call i32 @fminus.main({ ptr, i32 } [[NAME]], i32 [[N]])
+// IR-NOT:     fminus_rt_main_result
+// IR:         ret i32 %result

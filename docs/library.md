@@ -205,6 +205,10 @@ These are constraints a plugin runs into. `examples/plugin/`, a JUCE plugin, mee
   code is then folded for that mode, and each entry point sets it if the caller has not
   ([extending.md](extending.md), recipe 20). The plugin does: its `processBlock` flushes (JUCE's
   `ScopedNoDenormals`), and it compiles with `Flush`, so its `process` finds the mode set and writes nothing.
+- **Printing.** A program's `printf` and `eprintf` write the process's own C streams, stdout and stderr, which a
+  plugin's host may not show or may have closed ([programs.md](programs.md), "Printing"). Both allocate, in the
+  effects' terms, so a `[[clang::nonblocking]]` function cannot print: trace on a background thread, or from a function
+  the audio thread does not call.
 - **Parallel regions on the audio thread.** A `parallel for` or `parallel { }` runs on FMinus's pool and the audio
   thread together, in the audio thread's floating-point mode, and allocates and locks nothing. The audio thread starts
   on its own share at once; of the pool threads that slept (no region for 50 µs), it wakes only as many as the region

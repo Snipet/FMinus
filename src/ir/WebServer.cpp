@@ -426,17 +426,26 @@ namespace fminus::ir::detail
                                                                      const std::vector<const ast::Expr*>& values,
                                                                      std::vector<llvm::Value*>& texts)
     {
-        const ReplyFormatScan scan = scanReplyFormat(literal.value);
+        return placedArguments(literal, scanReplyFormat(literal.value),
+                               "a reply's format takes %d, an int; %g and %.Ng (N from 1 to 17), a float or a double; "
+                               "%s, a string; and %%, a percent sign",
+                               values, texts);
+    }
+
+    // The values of a format whose places `scan` found (a reply's, printf's: Print.cpp), each error of the scan's with
+    // `note`, which says what the format takes; then each value as replyArguments says.
+    std::optional<std::vector<llvm::Value*>> Lowering::placedArguments(const ast::StringExpr& literal,
+                                                                      const ReplyFormatScan& scan,
+                                                                      std::string_view note,
+                                                                      const std::vector<const ast::Expr*>& values,
+                                                                      std::vector<llvm::Value*>& texts)
+    {
         bool fine = scan.errors.empty();
         const auto at = [&](std::size_t offset) {
             return offset < literal.at.size() ? literal.at[offset] : literal.at.empty() ? SourceLocation{} : literal.at[0];
         };
         for (const FormatScan::Error& wrong : scan.errors)
-            diagnostics_.error(at(wrong.offset), wrong.message,
-                               {{at(wrong.offset),
-                                 "a reply's format takes %d, an int; %g and %.Ng (N from 1 to 17), a float or a "
-                                 "double; %s, a string; and %%, a percent sign",
-                                 {}}});
+            diagnostics_.error(at(wrong.offset), wrong.message, {{at(wrong.offset), std::string(note), {}}});
         const ast::Type real = ast::Type::Double;
         std::vector<llvm::Value*> converted;
         bool extraFine = true;   // the values past the last place, lowered for their own errors alone

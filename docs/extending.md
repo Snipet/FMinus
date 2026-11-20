@@ -39,7 +39,8 @@ JSON literal, which the runtime's JSON writer now writes, and `%s` in a reply; r
 deadline for the requests a block starts, every one of them ended where the block ends; recipe 50 its `json_read`, a
 module filled from a JSON document in one walk, by a table of the module's fields the compiler makes; and recipe 51 the
 report's last piece, a JSON literal of arrays, vectors, enumerations by name and modules, from the same table, written
-as a reply's, a POST's and a file's bytes. Then the pitfalls
+as a reply's, a POST's and a file's bytes. Recipe 52 is the first step of the plan for offline data, a program that is
+a tool: `int main`, its exit status, its arguments' text, and C's `printf`. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -54,7 +55,7 @@ recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`doubl
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
 the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
 (the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), recipe 45
-(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 48 (holes, and text from requests, documents and listings), recipe 49 (`within`), recipe 50 (`json_read`) and recipe 51 (a JSON literal of modules, and its sinks), so their sections describe how the code you have got there: read a section beside the files it
+(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 48 (holes, and text from requests, documents and listings), recipe 49 (`within`), recipe 50 (`json_read`), recipe 51 (a JSON literal of modules, and its sinks) and recipe 52 (`int main`, its arguments' text, and `printf`), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
 tested in the dev and asan presets, every test passing (recipes 38 to 51 in the release preset only: each says where).
@@ -10090,6 +10091,125 @@ hole's attributes without its default, a number's as a string's, so the one erro
   ThreadSanitizer (all but the nine fork-based proofs, which TSan's own thread keeps from exiting), no report. They
   run there since: their helper, `tests/unit/StrictMode.h`, ends that thread itself ([testing.md](testing.md), "A
   wait-free proof"; [web.md](web.md), "What is verified where").
+
+## Recipe 52: a program that is a tool: `int main`, its arguments' text, and `printf`
+
+*In the compiler. Code: `addEntryPoint` (`src/support/Aot.cpp`, `Aot.h`) and `fminus_rt_main_slot_args`
+(`src/runtime/Runtime.h`, `Runtime.cpp`); `CallType::String` and `CallString` (`src/jit/Call.h`, `Call.cpp`), and
+`--run`'s strings (`RunArgument`, `tools/fminus/main.cpp`); `printf` and `eprintf`: `Param::PrintFormat`, their
+entries in `kRuntimeBuiltins` and `RuntimeKind::Print` (`src/ir/Lowering.h`, `Calls.cpp`), `scanPrintFormat` and
+`printArguments` (`src/ir/Print.cpp`), `placedArguments` (`WebServer.cpp`, shared with a reply), and the runtime's
+`src/runtime/Printf.h` (the formatter) and `Print.cpp` (the streams), which the web server's replies now use too
+(`src/web/Server.cpp`). Tests: `tests/unit/PrintfTest.cpp` (`[printf]`), cases of `AotTest.cpp` and
+`CallThunkTest.cpp`, and `tests/lit/fminus/printf.fm` and `printf-errors.fm`. Built with `-Werror` and tested in the
+`dev` preset (651 tests, every one passing but three that skip themselves on the machine it was written on: a pool
+that wants more cores, and a locale with a decimal comma not installed) and the `web` preset (791, the same three
+skipped) on Linux x86-64 only; not in `asan`, `tsan` or `files`, nor on macOS or Windows.
+[research/data/README.md](research/data/README.md) is the plan; this is its step 1, §4.*
+
+The first step of the data plan is the one every later step's tests stand on: a program that is a tool, run from the
+command line on its own, rather than a function inside a host. It needs three things C has and FMinus did not: an exit
+status, the text of its arguments, and a way to say what happened.
+
+```c
+int main(string name, int times)          // ./greet world 2
+{
+    for (int i = 0; i < times; ++i)
+        printf("hello, %s (%d of %d)\n", name, i + 1, times);
+    if (times == 0)
+        eprintf("%s: nothing to do\n", name);
+    return times == 0;                    // the exit status
+}
+```
+
+### `int main` and its arguments
+
+**The entry's check is on the LLVM function's type**, as before (programs.md, "How an executable gets its entry"): a
+result of `i32` is an `int` main, whose value the C `main` returns as the exit status, with no call to print it; and a
+parameter of `i32` is an `int`, of `{ ptr, i32 }` a `string`. An `i1` stays refused as a parameter (a `bool`), and so
+does every other type.
+
+**A main with an int or a string reads every argument into a slot of 16 bytes**, through a third reader beside the
+float and double ones, `fminus_rt_main_slot_args(argc, argv, count, kinds, slots)`, whose kinds are a character a
+parameter (`f`, `d`, `i`, `s`). A string's slot is the argument's address and its length, laid out as FMinus lays out
+a `string`, so the entry loads it as `{ ptr, i32 }` and passes it by value, as FMinus passes every string: the view's
+bytes are `argv`'s, which live as long as the process. An int is decimal digits with an optional `-`, read by
+`std::from_chars`, which takes nothing but the whole argument and nothing that overflows 32 bits. The float and double
+mains keep their readers and their code, unchanged.
+
+language.md refused a `string` in `main`'s signature, beside a function the program declares and does not define:
+C's ABI passes a struct by each platform's own rules. Both sides of this call are FMinus's (the entry calls the
+program's `main` as LLVM IR, and so does the thunk below), so `main` is no such function, and the rule stays for the
+others.
+
+**`--run` passes strings too.** A thunk (recipe 36) passes each argument from a slot of 8 bytes; a string is 16, so
+its slot holds the address of a `CallString`, `{ const char* data; int32_t size; }`, and the thunk loads the view from
+there and passes it as the struct. `callType` maps `string` to `CallType::String`, a parameter's type only (a thunk
+refuses it as a result). `--run` points each string's `CallString` at its argument's text, which lives until the call
+returns. `Program::call` still passes none: its `Value` has no string, and `kindOf` says so.
+
+### `printf` and `eprintf`
+
+**A builtin of the runtime with a format**, as `http_reply_text` is (recipe 42, and recipe 48's `%s`): its parameter is
+`Param::PrintFormat`, a string literal, and its values follow it, each lowered and checked against its place by
+`placedArguments`, the reply's code made common (`replyArguments` calls it with a reply's scan and its note): every
+number passed as a double, an int's converted exactly and a float's widened, as C passes `printf`'s; every `%s`'s
+string in two arrays, the bytes' addresses and their lengths, to the `_s` function. So `printf` lowers to
+`fminus_rt_printf(format, length, values, count)` or `fminus_rt_printf_s(..., data, lengths, texts)`, and `eprintf` to
+the same pair on stderr.
+
+**The format** is `scanPrintFormat`'s (`src/ir/Print.cpp`): C's places, `%[flags][width][.precision]conversion`, of the
+flags `-`, `+`, ` ` and `0`, a width of at most 999 and a precision of at most 99, and the conversions `d`, `i`, `f`,
+`e`, `g`, `s` and `%%`. What C has and FMinus does not is an error at its byte, in clang's words where clang has words:
+`invalid conversion specifier 'x'` (with a note of what printf takes), `flag '0' results in undefined behavior with 's'
+conversion specifier`, `flag '0' is ignored when flag '-' is present`; and in FMinus's where it is narrower (a length
+modifier, `*`, `#`, the width's and the precision's ceilings). Its values' errors are a reply's: `format specifies type
+'int' but the argument has type 'float'`, `more '%' conversions than data arguments`, `data argument not used by
+format string`.
+
+**The text** is `formatPrintf`'s (`src/runtime/Printf.h`), a header with no state, no allocation and no call but
+`std::to_chars` and its writer's: C++ defines `to_chars`'s fixed, scientific and general formats with a precision as
+`printf`'s `%f`, `%e` and `%g`, so the digits are C's and in no locale; the rest is C's rules for the flags, the width
+and an int's precision. It trusts no byte of the literal (a `%` that begins no place it reads is itself), as
+`Format.h` does. `PrintfTest.cpp` checks it against the C library's `snprintf`.
+
+**The streams** are the C library's (`Print.cpp`): a call formats into a buffer of 512 bytes on its stack and writes it
+with `fwrite`, under the stream's lock (`flockfile`, `_lock_file` on Windows) for the whole call, so two calls'
+texts never interleave, as POSIX promises of C's `printf`; its result is the bytes written, or -1 when the stream took
+fewer. `fminus --run` flushes stdout after the call, since it prints its result through `llvm::outs()`, a buffer of its
+own.
+
+**Effects.** A C stream may allocate its buffer on its first write, and a write waits while a pipe is full, so the
+effects count both builtins as allocating (`RuntimeEffect::Allocates`): refused in a nonallocating function and in a
+nonblocking one. `describeRuntime` tells LLVM what they touch (`RuntimeKind::Print`): they read their arguments, keep
+no pointer to any, and write inaccessible memory (the stream) and errno; the `_s` functions read the strings' bytes
+through the arrays too (the suffix's rule); and none is `willreturn`, since a full pipe may never empty.
+
+**One formatter.** The web server wrote a reply's text with a formatter of its own, `%d`, `%g`, `%.Ng` and `%s`. It
+now calls `formatPrintf`, of which that is a part: a reply's format is still checked by `scanReplyFormat`, so it takes
+what it took, and the text is the same. What changed is what the runtime does with a format the compiler never passes
+a reply: `%.g` (a precision of no digits) was its own three bytes, and is now C's `%g` with a precision of 0, which
+`%g` takes as 1, as `printf` must (`WebServerTest.cpp`'s case of formats the library trusts no byte of says so).
+
+### Tests
+
+- `tests/unit/PrintfTest.cpp` (`[printf]`): the formatter against the C library's `snprintf`, `%d` and `%i` of eight
+  ints under twenty formats (every flag, widths, precisions), `%f`, `%e` and `%g` of 23 doubles (0, -0, ties, the
+  largest and the least, 1e21, an infinity, a NaN) under 26 formats, up to `%.99f` and `%999.2f`; `%s` padded and cut,
+  with a NUL among its bytes; values in order, each kind from its own list; and what the code generator never passes
+  (a `%` that begins no place, a place past the last value, `%s` without strings, past the widest width or
+  precision). Before the recipe went in, a harness outside the tree ran the same comparison over 49,200 combinations
+  of flags, widths, precisions and values, with no difference.
+- `tests/unit/AotTest.cpp`: an `int main` prints nothing and returns its result; a main of a string, an int, a float
+  and a double reads them through `fminus_rt_main_slot_args` with the kinds `"sifd"`; the signatures refused.
+- `tests/unit/CallThunkTest.cpp`: a thunk passes a string through a `CallString`'s address (its size, a byte, two
+  strings compared by content), refuses one as a result, and `callType` maps `string` to `CallType::String`.
+- `tests/lit/fminus/printf.fm`: every kind of place from `--run` (stdout and stderr apart, and `printf`'s result), an
+  executable's `int main(string name, int status)` (its output, its stderr, its exit status, an argument that is no
+  int or past 32 bits, the wrong count, a string with spaces and a `%` passed as it is), `--run main`, and the entry's
+  IR. `printf-errors.fm`: every error at its column, the effects', and the refused `main`.
+- Changed: `run.fm`, `handles.fm` and `simd.fm` (`--run`'s message names strings now), `string-type.fm` (`--run`
+  passes a string where it refused one), and `WebServerTest.cpp` (a reply's `%.g`, above).
 
 ## Pitfalls
 

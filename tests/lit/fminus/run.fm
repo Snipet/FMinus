@@ -96,6 +96,6 @@ float* address(float* x)
 // ELEMENT: fminus: --run: 'x' is not a float, an element of the array '1,x'
 // NOTINT: fminus: --run: '2.5' is not an int
 // NOTBOOL: fminus: --run: 'perhaps' is not a bool
-// INSTANCE: fminus: --run: 'Osc::tick' takes a parameter of type 'Osc *'; --run passes bools, ints, floats, doubles and
-// INSTANCE-SAME: arrays of ints, floats and doubles only
+// INSTANCE: fminus: --run: 'Osc::tick' takes a parameter of type 'Osc *'; --run passes bools, ints, floats, doubles,
+// INSTANCE-SAME: strings and arrays of ints, floats and doubles only
 // POINTER: fminus: --run: 'address' returns 'float *'; --run prints bools, ints, floats and doubles only

@@ -227,6 +227,7 @@ namespace fminus::ir::detail
         Route,
         QueryName,
         ReplyFormat,
+        PrintFormat,
         FileName,
         FilePattern,
         HeaderName,
@@ -336,6 +337,12 @@ namespace fminus::ir::detail
         std::vector<FormatScan::Error> errors;
     };
     ReplyFormatScan scanReplyFormat(std::string_view text);
+
+    // printf's and eprintf's format (Print.cpp, scanPrintFormat): C's printf's places, '%', the flags '-', '+', ' ' and
+    // '0', a width of at most 999, a precision of at most 99, and d or i (an int), f, e or g (a double), s (a string),
+    // or %% alone. The same scan as a reply's: each place's offset and the kind of value it takes, and the errors in
+    // clang's words where clang has words, FMinus's where it is narrower (runtime/Printf.h writes the text).
+    ReplyFormatScan scanPrintFormat(std::string_view text);
 
     // A route statement's literal (WebServer.cpp, scanRouteHoles): its holes, `{name}`, each where a %d could stand, or
     // a whole segment for a string's (a name in `texts`), and the literal the library takes, each hole a %d, a
@@ -961,6 +968,15 @@ namespace fminus::ir::detail
         bool checkQueryName(const ast::StringExpr& literal, SourceLocation where);
         bool checkHeaderName(const ast::StringExpr& literal, SourceLocation where);
         std::optional<std::vector<llvm::Value*>> replyArguments(const ast::StringExpr& literal,
+                                                                const std::vector<const ast::Expr*>& values,
+                                                                std::vector<llvm::Value*>& texts);
+        std::optional<std::vector<llvm::Value*>> placedArguments(const ast::StringExpr& literal,
+                                                                 const ReplyFormatScan& scan, std::string_view note,
+                                                                 const std::vector<const ast::Expr*>& values,
+                                                                 std::vector<llvm::Value*>& texts);
+
+        // ---- Print.cpp ----------------------------------------------------------------------------------------------
+        std::optional<std::vector<llvm::Value*>> printArguments(const ast::StringExpr& literal,
                                                                 const std::vector<const ast::Expr*>& values,
                                                                 std::vector<llvm::Value*>& texts);
         llvm::Value* replyValues(const std::vector<llvm::Value*>& values);

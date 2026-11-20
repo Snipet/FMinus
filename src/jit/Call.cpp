@@ -38,14 +38,19 @@ namespace fminus::jit
                 return llvm::Type::getDoubleTy(context);
             case CallType::Pointer:
                 return llvm::PointerType::getUnqual(context);
+            case CallType::String:   // FMinus's string (ir/Types.cpp), passed as the struct it is
+                return llvm::StructType::get(context,
+                                             {llvm::PointerType::getUnqual(context), llvm::Type::getInt32Ty(context)});
             }
             return llvm::Type::getVoidTy(context);
         }
 
-        // The type a slot holds it as: a bool a byte.
+        // The type a slot holds it as: a bool a byte, a string the address of a CallString.
         llvm::Type* slotType(llvm::LLVMContext& context, CallType type)
         {
-            return type == CallType::Bool ? llvm::Type::getInt8Ty(context) : irType(context, type);
+            return type == CallType::Bool     ? llvm::Type::getInt8Ty(context)
+                   : type == CallType::String ? llvm::PointerType::getUnqual(context)
+                                              : irType(context, type);
         }
     } // namespace
 
@@ -63,6 +68,8 @@ namespace fminus::jit
         llvm::IRBuilder<> builder(*context);
 
         // The function, declared as the program defines it, its bools zero-extended.
+        if (result == CallType::String)
+            return llvm::createStringError("fminus: a thunk's result of type string");
         std::vector<llvm::Type*> types;
         for (const CallType parameter : parameters)
         {
@@ -102,6 +109,9 @@ namespace fminus::jit
             llvm::Value* value = builder.CreateAlignedLoad(slotType(*context, parameters[i]), slot, slotAlign, "arg");
             if (parameters[i] == CallType::Bool)   // any byte but 0 is true, as a C++ bool's is
                 value = builder.CreateICmpNE(value, builder.getInt8(0), "bool");
+            if (parameters[i] == CallType::String)   // the view at the address the slot holds (a CallString)
+                value = builder.CreateAlignedLoad(irType(*context, CallType::String), value,
+                                                  llvm::Align(alignof(CallString)), "string");
             values.push_back(value);
         }
         llvm::CallInst* call = builder.CreateCall(calleeType, callee, values);
@@ -144,6 +154,8 @@ namespace fminus::jit
         case ast::Kind::Pointer:
         case ast::Kind::Handle:   // C's pointer to a struct the program never sees: a void* to a host
             return CallType::Pointer;
+        case ast::Kind::String:   // a pointer and a length: through a CallString's address
+            return CallType::String;
         case ast::Kind::Float2:
         case ast::Kind::Float4:
         case ast::Kind::Float8:
@@ -155,7 +167,6 @@ namespace fminus::jit
         case ast::Kind::Module:
         case ast::Kind::Array:
         case ast::Kind::Char:     // no value is one: an array's element, a pointer's pointee
-        case ast::Kind::String:   // a pointer and a length, a struct C's ABI passes by each platform's rules
             return std::nullopt;
         }
         return std::nullopt;

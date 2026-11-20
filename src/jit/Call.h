@@ -29,7 +29,7 @@ namespace fminus
     {
         class Jit;
 
-        // The types a thunk passes: C's scalars, and pointers.
+        // The types a thunk passes: C's scalars, pointers, and FMinus's strings (a parameter only).
         enum class CallType : std::uint8_t
         {
             Void,   // a result only: none
@@ -38,6 +38,7 @@ namespace fminus
             Float,
             Double,
             Pointer,
+            String,   // a parameter only: its slot holds the address of a CallString, which the thunk reads the view from
         };
 
         // An argument or a result in a thunk's memory: 8 bytes, aligned to 8, the value at its start in its own type:
@@ -65,6 +66,15 @@ namespace fminus
             }
         };
 
+        // A string a thunk passes, as FMinus lays one out (C's struct { const char* data; int size; }, 16 bytes): its
+        // slot holds this's address, and the bytes must live until the call returns (and as long as the function keeps
+        // the view, which is the function's to say).
+        struct CallString
+        {
+            const char* data = nullptr;
+            std::int32_t size = 0;
+        };
+
         using Thunk = void (*)(const CallSlot* arguments, CallSlot* result);
 
         // The thunk's symbol for `function`: "fminus.call." and its name, which no FMinus name can be.
@@ -78,8 +88,9 @@ namespace fminus
                                         llvm::ArrayRef<CallType> parameters);
 
         // How a thunk passes a value of FMinus's `type`: a scalar as itself (an enumerated type's as its int or bool),
-        // a pointer as a pointer, void as no result. Nothing for any other type (a vector, a module or an array, which
-        // FMinus passes by pointer).
+        // a pointer as a pointer, a string through the address of a CallString, void as no result. Nothing for any
+        // other type (a vector, a module or an array, which FMinus passes by pointer). A string is a parameter's type
+        // only: callThunk refuses a result of it.
         std::optional<CallType> callType(const ast::Type& type);
     } // namespace jit
 } // namespace fminus

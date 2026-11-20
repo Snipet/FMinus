@@ -81,16 +81,18 @@ namespace fminus::aot
     // with the web library's archives when the module calls a function of it (fminus_web_*).
     llvm::Error emitExecutable(llvm::Module& module, llvm::TargetMachine& machine, LinkOptions options);
 
-    // Makes a program's `float main(float, ...)`, `double main(...)` or `bool main(...)` its executable's entry, its
-    // parameters floats and doubles. C's entry is `int main(int, char**)`, so the program's main is renamed fminus.main
-    // (a name no FMinus function can have) and made internal, free to be inlined, and a new C main runs it: it reads
-    // main's arguments from the command line, each as its type says (strtof, strtod), calls it and prints its result,
-    // a float, a double or true or false (fminus_rt_main_args, or fminus_rt_main_double_args for a main with a double
-    // parameter; fminus_rt_main_result, fminus_rt_main_double_result, fminus_rt_main_bool_result: runtime/Runtime.h),
-    // exiting with 0, or with 2 when the arguments are wrong. A program with a parallel region gets the runtime's pool
-    // around the call (fminus_rt_parallel_start and _stop). Call it before prepareModule and optimising. Fails when the
-    // module defines no main, or a main that takes anything but floats and doubles or returns anything but a float, a
-    // double or a bool.
+    // Makes a program's `int main(...)`, `float main(...)`, `double main(...)` or `bool main(...)` its executable's
+    // entry, its parameters ints, floats, doubles and strings. C's entry is `int main(int, char**)`, so the program's
+    // main is renamed fminus.main (a name no FMinus function can have) and made internal, free to be inlined, and a new
+    // C main runs it: it reads main's arguments from the command line, each as its type says (strtof, strtod, an int's
+    // decimal digits, or a string, a view of the argument's own bytes), calls it, and for an int main exits with its
+    // result, C's exit status, printing nothing; for any other it prints the result, a float, a double or true or false,
+    // and exits with 0 (fminus_rt_main_args, fminus_rt_main_double_args for a main with a double parameter, or
+    // fminus_rt_main_slot_args for one with an int or a string; fminus_rt_main_result, fminus_rt_main_double_result,
+    // fminus_rt_main_bool_result: runtime/Runtime.h). It exits with 2 when the arguments are wrong. A program with a
+    // parallel region gets the runtime's pool around the call (fminus_rt_parallel_start and _stop). Call it before
+    // prepareModule and optimising. Fails when the module defines no main, or a main that takes anything but ints,
+    // floats, doubles and strings or returns anything but an int, a float, a double or a bool.
     //
     // With `loopBudget`, for a module compiled with the loop budget (ir::Options::loopBudget, opt/LoopBudget.h), the C
     // main sets the program's budget to it before the call, and when main runs past it says so on stderr

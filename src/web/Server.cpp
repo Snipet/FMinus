@@ -9,6 +9,8 @@
 #include "web/Handle.h"
 #include "web/Sockets.h"
 
+#include "runtime/Printf.h"   // a reply's text: printf's formatter, the runtime's (header only)
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1417,108 +1419,6 @@ namespace fminus::web
             }
         };
 
-        // %d: C's conversion of the value to an int, saturated (NaN is 0).
-        void putInt(Writer& out, double value)
-        {
-            std::int32_t n = 0;
-            if (value >= 2147483647.0)
-                n = std::numeric_limits<std::int32_t>::max();
-            else if (value <= -2147483648.0)
-                n = std::numeric_limits<std::int32_t>::min();
-            else if (value == value)
-                n = static_cast<std::int32_t>(value);
-            char digits[16];
-            out.put(digits, std::to_chars(digits, digits + sizeof digits, n).ptr);
-        }
-
-        // %g and %.Ng: as printf writes them (std::to_chars's general format with a precision is printf's %g).
-        void putFloat(Writer& out, double value, int precision)
-        {
-            char digits[160];   // a precision of at most 99: 99 digits, a sign, a point and an exponent
-            const std::to_chars_result result =
-                std::to_chars(digits, digits + sizeof digits, value, std::chars_format::general, precision);
-            if (result.ec == std::errc())
-                out.put(digits, result.ptr);
-        }
-
-        // A format's strings, fminus_web_http_reply_text_s's: the i-th the lengths[i] bytes at data[i] (checked by the
-        // caller: none negative, none null with bytes).
-        struct Texts
-        {
-            const char* const* data = nullptr;
-            const std::int32_t* lengths = nullptr;
-            std::int32_t count = 0;
-        };
-
-        // The format's text with its places filled: each value for a %d, %g or %.Ng, and with `texts` (the _s entry
-        // point's), each string for a %s, its bytes as they are (a %s past the last is nothing). Without `texts` a %s
-        // is itself, as every % that begins no place is.
-        void format(Writer& out, const char* text, std::int32_t length, const double* values, std::int32_t count,
-                    const Texts* texts = nullptr)
-        {
-            if (text == nullptr || length < 0)
-                return;
-            if (values == nullptr || count < 0)
-                count = 0;
-            std::int32_t next = 0;
-            std::int32_t nextText = 0;
-            for (std::int32_t i = 0; i < length && !out.over; ++i)
-            {
-                const char c = text[i];
-                if (c != '%' || i + 1 == length)
-                {
-                    out.put(c);
-                    continue;
-                }
-                const char d = text[i + 1];
-                if (d == '%')
-                {
-                    out.put('%');
-                    ++i;
-                }
-                else if (d == 'd' || d == 'g')
-                {
-                    ++i;
-                    if (next < count)
-                    {
-                        if (d == 'd')
-                            putInt(out, values[next]);
-                        else
-                            putFloat(out, values[next], 6);
-                        ++next;
-                    }
-                }
-                else if (d == 's' && texts != nullptr)
-                {
-                    ++i;
-                    if (nextText < texts->count)
-                    {
-                        const char* bytes = texts->data[nextText];
-                        if (texts->lengths[nextText] > 0)
-                            out.put(bytes, bytes + texts->lengths[nextText]);
-                        ++nextText;
-                    }
-                }
-                else if (d == '.')
-                {
-                    // %.Ng: one or two digits, then g.
-                    std::int32_t j = i + 2;
-                    int precision = 0;
-                    while (j < length && j < i + 4 && isDigit(text[j]))
-                        precision = precision * 10 + (text[j++] - '0');
-                    if (j > i + 2 && j < length && text[j] == 'g')
-                    {
-                        i = j;
-                        if (next < count)
-                            putFloat(out, values[next++], precision == 0 ? 1 : precision);
-                    }
-                    else
-                        out.put(c);
-                }
-                else
-                    out.put(c);
-            }
-        }
     } // namespace
 
     // ---- matching ---------------------------------------------------------------------------------------------------
@@ -2192,14 +2092,14 @@ namespace fminus::web
         // into the request's own buffer, then published.
         std::int32_t replyText(void* handle, std::int32_t status, const char* type, std::int32_t typeLength,
                                const char* text, std::int32_t length, const double* values, std::int32_t count,
-                               const Texts* texts)
+                               const fminus::runtime::PrintTexts* texts)
         {
             Slot* slot = held(handle);
             if (slot == nullptr || !validType(type, typeLength) || length < 0 || (text == nullptr && length > 0) ||
                 status < 200 || status > 599)
                 return FMINUS_WEB_INVALID;
             Writer out{slot->buffer.get(), slot->buffer.get() + slot->capacity};
-            format(out, text, length, values, count, texts);
+            fminus::runtime::formatPrintf(out, text, length, values, count, texts);   // printf's formatter
             if (out.over)
                 return FMINUS_WEB_LIMIT;
             const auto bytes = static_cast<std::int32_t>(out.at - slot->buffer.get());
@@ -2400,7 +2300,7 @@ extern "C"
                                               const std::int32_t* lengths, std::int32_t textCount) noexcept
     {
         // The strings: none that is not one; none at all for null arrays or a count below 1.
-        fminus::web::Texts strings;
+        fminus::runtime::PrintTexts strings;
         if (texts != nullptr && lengths != nullptr && textCount > 0)
         {
             for (std::int32_t i = 0; i < textCount; ++i)
