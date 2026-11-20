@@ -191,7 +191,10 @@ namespace fminus::ir::detail
             llvm::Value* last = builder_.CreateBinaryIntrinsic(
                 llvm::Intrinsic::smax, first, builder_.CreateBinaryIntrinsic(llvm::Intrinsic::smin, args[2], count),
                 nullptr, "to");
-            return make(at(data(args[0]), first), builder_.CreateNSWSub(last, first, "count"), "string_slice");
+            // The bytes before the count, a statement each: a call's arguments are evaluated in no fixed order
+            // (clang-cl's right to left), and the IR is the same whichever compiler built FMinus.
+            llvm::Value* bytes = at(data(args[0]), first);
+            return make(bytes, builder_.CreateNSWSub(last, first, "count"), "string_slice");
         }
         if (name == "string_starts" || name == "string_ends")
         {
