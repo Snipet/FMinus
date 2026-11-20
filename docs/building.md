@@ -268,7 +268,7 @@ Nothing is taken from the system unless an option asks for it.
 | Mbed TLS (`FMINUS_WEB`, macOS and Linux) | 4.1.1, the 4.1 LTS branch | the release's tarball (a GitHub release asset); built with its own CMake at configure time, static, threading on | `.deps/install/mbedtls-<version>-<flavor>` |
 | llhttp (`FMINUS_WEB_SERVER`, off by default) | 9.4.3 (2026-07-30) | source archive of the release's tag, `release/v9.4.3` (it holds the generated C); three C files compiled into `libfminus_web.a`, hidden, every lenient flag off | `.deps/src/llhttp-<version>` |
 | CLI11 | 2.7.2 | release source package, header-only, inside each build tree | the build tree |
-| Catch2 | 3.16.1 | source archive, built inside each build tree | the build tree |
+| Catch2 | 3.16.1 | source archive, built inside each build tree, in C++17 | the build tree |
 | pybind11 (the Python package only, `FMINUS_BUILD_PYTHON`) | 3.1.0 | PyPI's source distribution, header-only, inside each build tree | the build tree |
 | JUCE (`examples/plugin/` only) | 8.0.4, commit 51d11a2 | git clone of the pinned commit, by the plugin's own build | the plugin's build tree |
 
@@ -508,6 +508,9 @@ commands (`cmake --workflow --preset dev`), except `asan`, `tsan` and `xcode`. W
   `CMAKE_MSVC_RUNTIME_LIBRARY` is `MultiThreadedDLL`), which LLVM's libraries are built against too: the debug one
   (`/MDd`) has other iterators and another allocator, and the two do not link together. Catch2 and an inline LLVM
   follow it, and a cache-mode flavor records it.
+- **Catch2's standard.** Catch2 asks only for C++14, and clang-cl's default is C++14, where Catch2 compiles none of
+  its C++17 support (`Catch::StringMaker<std::string_view>`, ...) into its library: the tests, in C++17 and C++23,
+  would not link. `cmake/FMinusTesting.cmake` builds Catch2 in C++17, on every platform.
 - **Warnings.** clang-cl reads `-Wall` as cl's `/Wall`, which is clang's `-Weverything`, so FMinus's list starts from
   `/W4`, which is clang's `-Wall -Wextra`; the rest are clang's own flags, as elsewhere. `_CRT_SECURE_NO_WARNINGS` and
   `_CRT_NONSTDC_NO_WARNINGS` turn off the C runtime's deprecations of standard functions such as `getenv` and of

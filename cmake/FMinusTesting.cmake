@@ -14,6 +14,11 @@ FetchContent_Declare(Catch2
   SYSTEM
   EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(Catch2)
+# Catch2 in C++17. It asks for C++14 alone, so it is built in the compiler's default, and clang-cl's is C++14, where
+# Catch2 compiles none of its C++17 support (StringMaker<std::string_view>, ...) into the library that the tests' C++17
+# and C++23 headers declare: they would not link. C++17 is GCC's and clang's default elsewhere, and the oldest standard
+# a test is built in (fminus-library-tests); what C++20 adds to Catch2 is in its headers alone.
+set_target_properties(Catch2 Catch2WithMain PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
 
