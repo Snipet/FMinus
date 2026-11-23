@@ -1,0 +1,207 @@
+// counter.fm: a whole application's interface and logic in FMinus, drawn by FunkGui. A counter with three buttons, a
+// slider for its step, the arrow keys, a readout that flashes when it changes, and its accessibility items. The host
+// (host.cpp) owns the window's side: it calls app_tick, app_draw and the input functions, and defines what ui.fm
+// declares.
+//
+// Compiled with -D V2 it is the same program after an edit: a second row of state (a total of every step taken), a
+// taller window and a wider slider. The host compiles that while the first runs, to try a reload that keeps the state.
+#include "ui.fm"
+
+#ifdef V2
+enum { W = 360, H = 236 };
+#else
+enum { W = 360, H = 200 };
+#endif
+enum { ID_MINUS = 1, ID_PLUS, ID_RESET, ID_STEP };
+enum { STEP_MAX = 10 };
+
+module Button
+{
+    float x, y, w, h;
+    float glow;                                   // 0 at rest, 1 under the pointer: eased, never set
+    float press;                                  // 1 while held
+    bool hot, held;
+
+    void place(float px, float py, float pw, float ph) { x = px; y = py; w = pw; h = ph; }
+    bool contains(float px, float py) { return px >= x && px < x + w && py >= y && py < y + h; }
+    bool moving() { return glow != (hot ? 1.0f : 0.0f) || press != (held ? 1.0f : 0.0f); }
+
+    void tick(float dt) [[clang::nonblocking]]
+    {
+        glow = toward(glow, hot ? 1.0f : 0.0f, dt, hot ? 0.09f : 0.16f);
+        press = toward(press, held ? 1.0f : 0.0f, dt, 0.05f);
+    }
+
+    void draw(string label) [[clang::nonblocking]]
+    {
+        ui_rrect(x, y, w, h, 4, INK16, 0.35f + 0.65f * glow);
+        ui_rrect(x, y, w, h, 4, ACCENT_DIM, press);
+        ui_frame(x, y, w, h, 4, 1, hot ? ACCENT : INK32, 1);
+        ui_text(label, x + w / 2, ui_cap_centre(y + h / 2, LATCH), LATCH, hot ? INK100 : INK70, CENTRE);
+    }
+};
+
+module App
+{
+    int count;
+    int step;                                     // 1 to STEP_MAX
+#ifdef V2
+    int total;                                    // every step taken, whichever way: a field the edit added
+#endif
+    float flash;                                  // 1 when the count changes, eased back to 0
+    Button minus, plus, reset;
+    float trackX, trackY, trackW;                 // the slider
+    bool sliding, overTrack;
+    int held;                                     // the button a press began on, or 0
+
+    void layout()
+    {
+        minus.place(24, 108, 64, 32);
+        plus.place(96, 108, 64, 32);
+        reset.place(W - 24 - 96, 108, 96, 32);
+        trackX = 24;
+        trackY = 172;
+#ifdef V2
+        trackW = W - 48;
+#else
+        trackW = W - 48 - 56;
+#endif
+    }
+
+    void init()
+    {
+        step = 1;
+        layout();
+    }
+
+    void add(int n)
+    {
+        count += n;
+#ifdef V2
+        total += n < 0 ? -n : n;
+#endif
+        flash = 1;
+    }
+
+    void act(int id)
+    {
+        if (id == ID_MINUS) add(-step);
+        if (id == ID_PLUS) add(step);
+        if (id == ID_RESET && count != 0) { count = 0; flash = 1; }
+    }
+
+    void slide(float x)
+    {
+        const float t = fminf(fmaxf((x - trackX) / trackW, 0), 1);
+        step = 1 + (int)floorf(t * (STEP_MAX - 1) + 0.5f);
+    }
+
+    int over(float x, float y)
+    {
+        if (minus.contains(x, y)) return ID_MINUS;
+        if (plus.contains(x, y)) return ID_PLUS;
+        if (reset.contains(x, y)) return ID_RESET;
+        return 0;
+    }
+
+    void pointer(float x, float y, int phase)
+    {
+        const int at = phase == EXIT ? 0 : over(x, y);
+        minus.hot = at == ID_MINUS;
+        plus.hot = at == ID_PLUS;
+        reset.hot = at == ID_RESET;
+        overTrack = phase != EXIT && x >= trackX - 8 && x < trackX + trackW + 8 && y >= trackY - 12 && y < trackY + 12;
+        if (phase == DOWN)
+        {
+            held = at;
+            sliding = at == 0 && overTrack;
+        }
+        if (sliding && (phase == DOWN || phase == DRAG))
+            slide(x);
+        if (phase == UP)
+        {
+            if (held != 0 && held == at)
+                act(held);                        // a click is a press and a release on the same button
+            held = 0;
+            sliding = false;
+        }
+        minus.held = held == ID_MINUS && minus.hot;
+        plus.held = held == ID_PLUS && plus.hot;
+        reset.held = held == ID_RESET && reset.hot;
+    }
+
+    bool key(int k)
+    {
+        if (k == KEY_UP) { add(step); return true; }
+        if (k == KEY_DOWN) { add(-step); return true; }
+        if (k == KEY_RIGHT && step < STEP_MAX) { step += 1; return true; }
+        if (k == KEY_LEFT && step > 1) { step -= 1; return true; }
+        return false;
+    }
+
+    void tick(float dt) [[clang::nonblocking]]
+    {
+        minus.tick(dt);
+        plus.tick(dt);
+        reset.tick(dt);
+        flash = toward(flash, 0, dt, 0.25f);
+    }
+
+    bool moving() { return flash != 0 || minus.moving() || plus.moving() || reset.moving(); }
+
+    void draw() [[clang::nonblocking]]
+    {
+        ui_text("COUNTER", 24, 20, WORDMARK, INK100, LEFT);
+        ui_text("FMINUS + FUNKGUI", W - 24, 22, CAPTION, INK52, RIGHT);
+        ui_hairline(24, 44, W - 48, INK16, 1);
+
+        ui_int(count, 24, 52, DISPLAY, count == 0 ? INK32 : INK100, LEFT);
+        ui_rrect(24, 98, W - 48, 2, 1, ACCENT, flash);
+#ifdef V2
+        ui_text("TOTAL", W - 24 - 72, 60, CAPTION, INK52, LEFT);
+        ui_int(total, W - 24, 74, VALUE_S, INK70, RIGHT);
+#endif
+
+        minus.draw("-");
+        plus.draw("+");
+        reset.draw("RESET");
+
+        ui_text("STEP", trackX, trackY - 22, CAPTION, INK52, LEFT);
+        ui_int(step, trackX + trackW, trackY - 24, VALUE_S, INK100, RIGHT);
+        ui_hairline(trackX, trackY, trackW, INK32, 1);
+        const float t = (float)(step - 1) / (STEP_MAX - 1);
+        ui_rrect(trackX, trackY - 1, trackW * t, 2, 1, sliding || overTrack ? ACCENT : INK70, 1);
+        ui_disc(trackX + trackW * t, trackY, sliding ? 6.0f : 5.0f, sliding || overTrack ? ACCENT : INK100, 1);
+    }
+
+    void accessibility() [[clang::nonblocking]]
+    {
+        ui_a11y(ID_MINUS, ROLE_BUTTON, minus.x, minus.y, minus.w, minus.h, "Subtract", 0, 0, 0);
+        ui_a11y(ID_PLUS, ROLE_BUTTON, plus.x, plus.y, plus.w, plus.h, "Add", 0, 0, 0);
+        ui_a11y(ID_RESET, ROLE_BUTTON, reset.x, reset.y, reset.w, reset.h, "Reset", 0, 0, 0);
+        ui_a11y(ID_STEP, ROLE_SLIDER, trackX, trackY - 12, trackW, 24, "Step", step, 1, STEP_MAX);
+    }
+
+    void action(int id, int what, float value)
+    {
+        if (what == ACT_PRESS) act(id);
+        if (id == ID_STEP && what == ACT_SET) step = (int)fminf(fmaxf(value, 1), STEP_MAX);
+        if (id == ID_STEP && what == ACT_INCREMENT && step < STEP_MAX) step += 1;
+        if (id == ID_STEP && what == ACT_DECREMENT && step > 1) step -= 1;
+    }
+};
+
+// What the host calls: plain C functions over an instance it allocates (app_size() bytes, zeroed).
+int app_size() { return sizeof(App); }
+int app_width() { return W; }
+int app_height() { return H; }
+void app_init(App* app) { app->init(); }
+void app_relayout(App* app) { app->layout(); }                 // after a reload: positions are code, not state
+void app_tick(App* app, float dt) [[clang::nonblocking]] { app->tick(dt); }
+bool app_moving(App* app) { return app->moving(); }
+void app_draw(App* app) [[clang::nonblocking]] { app->draw(); }
+void app_pointer(App* app, float x, float y, int phase) { app->pointer(x, y, phase); }
+bool app_key(App* app, int key) { return app->key(key); }
+void app_accessibility(App* app) [[clang::nonblocking]] { app->accessibility(); }
+void app_action(App* app, int id, int what, float value) { app->action(id, what, value); }
+int app_count(App* app) { return app->count; }
