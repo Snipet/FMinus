@@ -1,0 +1,14 @@
+jit:                   counter.fm compiled and linked in 78.0 ms (-O2)
+jit-1-rest              43 primitives, 0 missing glyphs, geometry 9c685e45af10bec6, text b7df00428ff91004, 720x400 px 91afce4f5f4500b9
+jit-2-moving            46 primitives, 0 missing glyphs, geometry c3fe1cb8ab368ed9, text 3aa4d0cc056a74bd, 720x400 px 39da5da90a0b7359
+jit-3-settled           45 primitives, 0 missing glyphs, geometry c9846dfc1080d77a, text 3aa4d0cc056a74bd, 720x400 px 817c909519babf8c
+jit:                   count 15; settled in 0 frames at first, 98 after the input
+  a11y   2 Subtract                 24,108,64,32
+  a11y   2 Add                      96,108,64,32
+  a11y   2 Reset                    240,108,96,32
+  a11y   0 Step                     24,160,256,24        value=6
+jit:                   1.00 us a frame recorded (45 primitives), mean of 20000
+reload:                the edit compiled in 84.6 ms; App is 120 bytes, was 116; 33 fields carried over
+reload-1-carried        51 primitives, 0 missing glyphs, geometry b56dbcf9afecfa80, text 2a09c5912b181212, 720x472 px 8297291f144ee02c
+reload-2-used           51 primitives, 0 missing glyphs, geometry b56dbcf9afecfa80, text cd70d825f0e88b84, 720x472 px 6fe77a4b713850bd
+reload:                count 21 after one more click

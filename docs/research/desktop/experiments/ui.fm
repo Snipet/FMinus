@@ -1,0 +1,45 @@
+// ui.fm: what an FMinus program sees of FunkGui in this experiment. Each prototype without a definition is an
+// external C function (docs/language.md): the JIT resolves it in the process, and the linker in an executable. The
+// host (host.cpp) defines them over funkgui::Canvas. Nothing here is a builtin, and no compiler change was made.
+
+enum Ink { GROUND, INK100, INK70, INK52, INK32, INK16, ACCENT, ACCENT_DIM, SIGNAL };       // funkgui::Theme's tokens
+enum Style { DISPLAY, VALUE_P, VALUE_S, NUMERAL, WORDMARK, LATCH, LABEL, CAPTION, MICRO, UNIT };   // funkgui::type's
+enum Align { LEFT, CENTRE, RIGHT };
+enum Phase { MOVE, DOWN, DRAG, UP, EXIT };                    // a pointer event's kind, as the host sends it
+enum Key { KEY_CHARACTER, KEY_TAB, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT };   // the first of funkgui::Key
+enum Role { ROLE_SLIDER, ROLE_TOGGLE, ROLE_BUTTON };          // the first of funkgui::A11yRole
+enum Action { ACT_PRESS, ACT_TOGGLE, ACT_SET, ACT_INCREMENT, ACT_DECREMENT };   // the first of funkgui::A11yAction
+
+// Drawing: recorded into the frame's funkgui::Canvas, in logical pixels. A colour is a theme token and an alpha.
+void ui_rrect(float x, float y, float w, float h, float radius, int ink, float alpha) [[clang::nonblocking]];
+void ui_frame(float x, float y, float w, float h, float radius, float border, int ink, float alpha)
+    [[clang::nonblocking]];
+void ui_hairline(float x, float y, float w, int ink, float alpha) [[clang::nonblocking]];
+void ui_disc(float cx, float cy, float r, int ink, float alpha) [[clang::nonblocking]];
+void ui_text_bytes(const void* utf8, int bytes, float x, float y, int style, int ink, int align) [[clang::nonblocking]];
+void ui_int(int value, float x, float y, int style, int ink, int align) [[clang::nonblocking]];
+float ui_cap_centre(float centreY, int style) [[clang::nonblocking]];   // the top that centres a style's capitals
+
+// Accessibility: one item for each thing a person can operate, listed when the host asks.
+void ui_a11y_bytes(int id, int role, float x, float y, float w, float h, const void* title, int bytes, float value,
+                   float lo, float hi) [[clang::nonblocking]];
+
+// A string is a view (a pointer and a length), which no external function takes: these pass its two halves.
+void ui_text(string s, float x, float y, int style, int ink, int align) [[clang::nonblocking]]
+{
+    ui_text_bytes(string_data(s), string_size(s), x, y, style, ink, align);
+}
+
+void ui_a11y(int id, int role, float x, float y, float w, float h, string title, float value, float lo, float hi)
+    [[clang::nonblocking]]
+{
+    ui_a11y_bytes(id, role, x, y, w, h, string_data(title), string_size(title), value, lo, hi);
+}
+
+// funkgui::ease::toward: x a step nearer its target, and on it within a thousandth, so an animation ends.
+float toward(float x, float target, float dt, float tau) [[clang::nonblocking]]
+{
+    const float k = dt >= tau ? 1.0f : dt / tau;
+    x += (target - x) * k;
+    return fabsf(target - x) <= 0.001f ? target : x;
+}

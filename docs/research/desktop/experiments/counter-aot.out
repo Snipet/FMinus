@@ -1,0 +1,9 @@
+aot-1-rest              43 primitives, 0 missing glyphs, geometry 9c685e45af10bec6, text b7df00428ff91004, 720x400 px 91afce4f5f4500b9
+aot-2-moving            46 primitives, 0 missing glyphs, geometry c3fe1cb8ab368ed9, text 3aa4d0cc056a74bd, 720x400 px 39da5da90a0b7359
+aot-3-settled           45 primitives, 0 missing glyphs, geometry c9846dfc1080d77a, text 3aa4d0cc056a74bd, 720x400 px 817c909519babf8c
+aot:                   count 15; settled in 0 frames at first, 98 after the input
+  a11y   2 Subtract                 24,108,64,32
+  a11y   2 Add                      96,108,64,32
+  a11y   2 Reset                    240,108,96,32
+  a11y   0 Step                     24,160,256,24        value=6
+aot:                   1.07 us a frame recorded (45 primitives), mean of 20000
