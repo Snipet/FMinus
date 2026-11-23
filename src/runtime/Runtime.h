@@ -179,6 +179,62 @@ extern "C"
     std::int32_t fminus_rt_eprintf_s(const char* format, std::int32_t length, const double* values, std::int32_t count,
                                      const char* const* data, const std::int32_t* lengths, std::int32_t texts) noexcept;
 
+    // The CSV reader (Csv.cpp, in every build), for FMinus's csv_* builtins: RFC 4180's text read where it lies.
+    //   fminus_rt_csv_parse    a document of the `bytes` bytes at `data`, its first record the header, fields split by
+    //                          `delimiter` (a byte, not '"', CR or LF): it keeps `data`'s address, so the bytes must
+    //                          outlive it, and an index of the rows; null for a text that is no CSV (a quote never
+    //                          closed, a byte after a closing quote, a record of more fields than the header, no
+    //                          header) or for no memory. It allocates.
+    //   fminus_rt_csv_free     frees a document (null: nothing). It allocates.
+    //   fminus_rt_csv_rows     its rows, the header not counted; fminus_rt_csv_columns, the header's fields; 0 for
+    //                          null.
+    //   fminus_rt_csv_name     column `column`'s name, unescaped, the document's bytes and their count in `length`;
+    //                          null and 0 outside the header.
+    //   fminus_rt_csv_find     the first column whose name is the `length` bytes at `name`, or -1.
+    //   fminus_rt_csv_floats   a column's cells as floats into `out`, the first `cap` rows (each NaN when it is no
+    //                          number); fminus_rt_csv_doubles as doubles; fminus_rt_csv_ints as ints, each `fallback`
+    //                          when it is no integer an int holds. The column is `column`, or when `name` is not null
+    //                          the first of that name. The rows there are, or -1 (CSV_MISSING) for a column the header
+    //                          does not have (and every column of a null document). Wait-free: bounded by the document.
+    //   fminus_rt_csv_read     the first `cap` rows into the array of modules at `rows`, each `size` bytes, by
+    //                          `shape`, a module's table of one record a column (JsonShapes.h; ir/Csv.cpp), each from
+    //                          the column of its name: the rows of which every field without a default was filled from
+    //                          its cell; -1 (CSV_MISSING) when a field without a default has no column, and nothing
+    //                          written; -2 (CSV_INVALID) for a table it refuses or no memory; 0 for a null document. A
+    //                          cell not read leaves its field at its default, or a float's or a double's NaN, or as it
+    //                          was. It allocates, and converts blocks of rows on the pool (Parallel.cpp).
+    //   fminus_rt_csv_levels   how many distinct texts a column's cells hold (its categories, made in row order the
+    //                          first time a read asks); fminus_rt_csv_label the text of category `code`, the document's
+    //                          bytes and their count in `size`, or null and 0. A column as the reads name one. They
+    //                          allocate.
+    void* fminus_rt_csv_parse(const void* data, std::int32_t bytes, std::int32_t delimiter) noexcept;
+    void fminus_rt_csv_free(void* doc) noexcept;
+    std::int32_t fminus_rt_csv_rows(const void* doc) noexcept;
+    std::int32_t fminus_rt_csv_columns(const void* doc) noexcept;
+    const char* fminus_rt_csv_name(const void* doc, std::int32_t column, std::int32_t* length) noexcept;
+    std::int32_t fminus_rt_csv_find(const void* doc, const char* name, std::int32_t length) noexcept;
+    std::int32_t fminus_rt_csv_floats(const void* doc, std::int32_t column, const char* name, std::int32_t length,
+                                      float* out, std::int32_t cap) noexcept;
+    std::int32_t fminus_rt_csv_doubles(const void* doc, std::int32_t column, const char* name, std::int32_t length,
+                                       double* out, std::int32_t cap) noexcept;
+    std::int32_t fminus_rt_csv_ints(const void* doc, std::int32_t column, const char* name, std::int32_t length,
+                                    std::int32_t* out, std::int32_t cap, std::int32_t fallback) noexcept;
+    std::int32_t fminus_rt_csv_read(void* doc, const void* shape, void* rows, std::int32_t size,
+                                    std::int32_t cap) noexcept;
+    std::int32_t fminus_rt_csv_levels(void* doc, std::int32_t column, const char* name, std::int32_t length) noexcept;
+    const char* fminus_rt_csv_label(void* doc, std::int32_t column, const char* name, std::int32_t length,
+                                    std::int32_t code, std::int32_t* size) noexcept;
+
+    // NumPy's .npy (Npy.cpp, in every build), for npy_floats and npy_shape: the `bytes` bytes at `data` read as an .npy
+    // file of version 1.0 to 3.0, of little-endian float32, float64 or int32 values in C order.
+    //   fminus_rt_npy_floats   its values as floats into `out`, the first `cap`: how many values it holds (its shape's
+    //                          product), or -1 for bytes that are no such file.
+    //   fminus_rt_npy_shape    its shape's dimension `axis` (from 0), or with an axis of -1 how many dimensions it has;
+    //                          -1 for no such file or no such dimension.
+    // They read the bytes they are given (and write `out`) and nothing else: wait-free.
+    std::int32_t fminus_rt_npy_floats(const void* data, std::int32_t bytes, float* out, std::int32_t cap) noexcept;
+    std::int32_t fminus_rt_npy_shape(const void* data, std::int32_t bytes, std::int32_t axis) noexcept;
+
 #if FMINUS_HAS_JSON
     // The JSON parser (Json.cpp, on yyjson; a build with FMINUS_JSON only), for FMinus's json_* builtins.
     //

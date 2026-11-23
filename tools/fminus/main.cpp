@@ -65,6 +65,9 @@
 //                                           the plan
 //     fminus pedal.cir --probes --nodes --emit fm   the module with its probe fields (Options::probes), and the
 //                                           netlist's nodes as a probe sees them (Result::nodes) on stderr
+//     fminus iris.csv --emit fm             the module a table's header and rows suggest, a field a column, for a
+//                                           program's csv_read (api/CsvSchema.h; .tsv splits at tabs)
+#include "api/CsvSchema.h"   // fminus data.csv --emit fm
 #include "fminus/Circuit.h"
 #include "fminus/Config.h"   // FMINUS_VERSION_STRING, FMINUS_LLVM_PACKAGE_VERSION, FMINUS_HAS_*
 #include "frontend/Frontend.h"
@@ -315,15 +318,28 @@ namespace
         return !number.empty() && end == number.c_str() + number.size();
     }
 
+    // Whether a file's name ends in `extension` (".cir"), in any case.
+    bool endsWith(std::string_view name, std::string_view extension)
+    {
+        if (name.size() < extension.size())
+            return false;
+        std::string tail(name.substr(name.size() - extension.size()));
+        for (char& c : tail)
+            c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        return tail == extension;
+    }
+
     // Whether a file's name ends in .cir, in any case: a circuit netlist (fminus::circuit).
     bool isNetlist(std::string_view name)
     {
-        if (name.size() < 4)
-            return false;
-        std::string tail(name.substr(name.size() - 4));
-        for (char& c : tail)
-            c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-        return tail == ".cir";
+        return endsWith(name, ".cir");
+    }
+
+    // Whether a file's name ends in .csv or .tsv, in any case: a table, whose module --emit fm writes
+    // (api/CsvSchema.h).
+    bool isTable(std::string_view name)
+    {
+        return endsWith(name, ".csv") || endsWith(name, ".tsv");
     }
 
     // What the circuit compiler said of the .cir files the program reads (the input and its #includes): its messages,
@@ -729,7 +745,9 @@ int main(int argc, char** argv)
     bool assembly = false;     // -S
     bool emitLlvm = false;     // -emit-llvm
     bool printRuntimeAndExit = false;
-    app.add_option("input", input, "FMinus source file ('-' for stdin), or a circuit netlist (.cir)");
+    app.add_option("input", input,
+                   "FMinus source file ('-' for stdin), a circuit netlist (.cir), or a table (.csv, .tsv) for "
+                   "--emit fm");
     app.add_option("args", runArgs,
                    "The arguments of --run's function: a bool, an int, a float or a double each, or an array's "
                    "elements separated by commas (1,2,3) for a pointer");
@@ -923,9 +941,9 @@ int main(int argc, char** argv)
             emit = kindOfName(output);
             if (emit.empty())
                 emit = isDeviceOrPipe(output) ? "ll" : "exe";
-            if (emit == "fm" && !isNetlist(input))
+            if (emit == "fm" && !isNetlist(input) && !isTable(input))
                 return fail("-o " + output + ": a .fm file is what --emit fm writes, the FMinus module a circuit "
-                            "netlist (.cir) generates, and " + input + " is not one");
+                            "netlist (.cir) generates or a table (.csv, .tsv) suggests, and " + input + " is neither");
         }
         // -c and -S without -o: a file named after the input, in the current directory, as clang names it.
         if ((objectFile || assembly) && outputOption->count() == 0 && input != "-")
@@ -1060,8 +1078,19 @@ int main(int argc, char** argv)
         text = circuit.source;
         sourceName = input + ".fm";   // FMinus's messages cite the lines --emit fm prints, re-cited at the netlist's
     }
+    else if (isTable(input))   // a table: the module its header and rows suggest, and nothing else
+    {
+        if (emit != "fm" || !run.empty())
+            return fail(input + " is a table: --emit fm writes the module its header and rows suggest, for a program "
+                                "that reads it with csv_parse and csv_read");
+        std::string schema;
+        std::string wrong;
+        if (!fminus::csvSchema(text, input, endsWith(input, ".tsv") ? '\t' : ',', schema, wrong))
+            return fail(wrong);
+        return writeText(output, schema);
+    }
     else if (emit == "fm")
-        return fail("--emit fm: " + input + " is not a circuit netlist (.cir)");
+        return fail("--emit fm: " + input + " is neither a circuit netlist (.cir) nor a table (.csv, .tsv)");
     fminus::frontend::Defines defines;
     for (const std::string& spec : defineSpecs)
     {

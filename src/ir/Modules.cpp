@@ -423,6 +423,8 @@ namespace fminus::ir::detail
                                            : ": a field takes fminus::range(min, max) and fminus::default(value)"));
             else if (member && attribute.name.starts_with("json::"))
                 checkJsonAttribute(attribute);   // Shapes.cpp
+            else if (member && attribute.name.starts_with("csv::"))
+                checkCsvAttribute(attribute, field, type);   // Csv.cpp
             else if (attribute.name == "clang::nonblocking" || attribute.name == "clang::nonallocating")
                 error(attribute.location, quoted(attribute.name) + " attribute only applies to functions");
             else if (attribute.name.starts_with("clang::"))

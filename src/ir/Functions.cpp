@@ -367,6 +367,8 @@ namespace fminus::ir::detail
             return &found->second;
         if (const Binding* status = webStatus(name))
             return status;
+        if (const Binding* status = csvStatus(name))
+            return status;
         return fileStatus(name);
     }
 } // namespace fminus::ir::detail

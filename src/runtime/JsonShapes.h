@@ -35,8 +35,9 @@ namespace
     // A module field's flags.
     enum : std::int32_t
     {
-        FieldRange = 1,     // a range follows: the least and the greatest value, each a double in two words
-        FieldDefault = 2,   // a default follows: a double in two words
+        FieldRange = 1,      // a range follows: the least and the greatest value, each a double in two words
+        FieldDefault = 2,    // a default follows: a double in two words
+        FieldCategory = 4,   // csv_read's only: an int field that holds a column's category code (Csv.cpp)
     };
 
     // How deep shapes nest: each pointer, array, span and module is one level.
@@ -120,8 +121,9 @@ namespace
     // of other than 1 or 4 bytes, a module of more than kMostFields fields or a field whose size is not its record's,
     // a range or a default on a field whose values are not numbers (a range: float, double, int or an enumeration's; a
     // default: those or a bool), or a depth past kMostShapeDepth. `reading`: also a kind json_module does not fill (a
-    // string, a pointer, a span) and a char array of no byte.
-    std::int32_t shapeEnd(const Table& table, std::int32_t at, int depth, bool reading)
+    // string, a pointer, a span) and a char array of no byte. FieldCategory is a field's flag only when `categories`
+    // (csv_read's tables), and only on an int.
+    std::int32_t shapeEnd(const Table& table, std::int32_t at, int depth, bool reading, bool categories = false)
     {
         if (depth > kMostShapeDepth || at < 0 || at >= table.words)
             return -1;
@@ -156,12 +158,12 @@ namespace
             return at + 2 + 3 * names;
         }
         case ShapePointer:
-            return reading ? -1 : shapeEnd(table, at, depth + 1, reading);
+            return reading ? -1 : shapeEnd(table, at, depth + 1, reading, categories);
         case ShapeArray:
         case ShapeSpan:
             if ((reading && kind == ShapeSpan) || left < 2 || table.word(at) < 0 || table.word(at + 1) < 0)
                 return -1;
-            return shapeEnd(table, at + 2, depth + 1, reading);
+            return shapeEnd(table, at + 2, depth + 1, reading, categories);
         case ShapeVector:
             if (left < 1 || (table.word(at) != 2 && table.word(at) != 4 && table.word(at) != 8))
                 return -1;
@@ -179,12 +181,15 @@ namespace
                     return -1;
                 const std::int32_t flags = table.word(at + 4);
                 const std::int32_t extra = ((flags & FieldRange) != 0 ? 4 : 0) + ((flags & FieldDefault) != 0 ? 2 : 0);
-                if (flags < 0 || flags > (FieldRange | FieldDefault) || table.word(at + 3) < 0
+                const std::int32_t most = FieldRange | FieldDefault | (categories ? FieldCategory : 0);
+                if (flags < 0 || flags > most || table.word(at + 3) < 0
                     || !inBytes(table, table.word(at + 1), table.word(at + 2)) || table.words - at - 5 < extra)
                     return -1;
                 const std::int32_t shape = at + 5 + extra;
-                const std::int32_t end = shapeEnd(table, shape, depth + 1, reading);
+                const std::int32_t end = shapeEnd(table, shape, depth + 1, reading, categories);
                 if (end < 0 || table.word(at) != end - at)
+                    return -1;
+                if ((flags & FieldCategory) != 0 && table.word(shape) != ShapeInt)
                     return -1;
                 const std::int32_t leaf = leafKind(table, shape);
                 const bool number = leaf == ShapeFloat || leaf == ShapeDouble || leaf == ShapeInt || leaf == ShapeEnum;

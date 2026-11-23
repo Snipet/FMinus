@@ -228,6 +228,12 @@ namespace fminus::ir::detail
         QueryName,
         ReplyFormat,
         PrintFormat,
+        CsvDoc,
+        Column,
+        Doubles,
+        Ints,
+        Delimiter,
+        Rows,
         FileName,
         FilePattern,
         HeaderName,
@@ -260,6 +266,7 @@ namespace fminus::ir::detail
         Bytes,
         Void,
         String,
+        CsvDoc,
     };
 
     // A builtin that calls a function of the runtime with its arguments, as Param says to pass each (Calls.cpp,
@@ -1032,6 +1039,22 @@ namespace fminus::ir::detail
         bool addJsonShape(SourceLocation location, ast::Type type, bool address, JsonPlan& plan);
         llvm::Value* jsonWriter();
 
+        // ---- Csv.cpp ------------------------------------------------------------------------------------------------
+        const Binding* csvStatus(const std::string& name) const;
+        void checkCsvAttribute(const ast::Attribute& attribute, const ast::Field& field, ast::Type type);
+        llvm::Value* csvShape(SourceLocation location, const ast::Module& module);
+        bool csvColumns(const ast::Module& module, std::uint64_t base, const std::string& prefix, ShapeTable& table,
+                        std::int32_t& count, std::map<std::string, SourceLocation>& names, int depth);
+        bool csvLeaf(const ast::Field& field, ast::Type leaf, std::uint64_t offset, const std::string& name,
+                     ShapeTable& table, std::int32_t& count, std::map<std::string, SourceLocation>& names);
+        bool csvElements(const ast::Field& field, ast::Type type, std::uint64_t offset, const std::string& name,
+                         const std::vector<std::string>* listed, ShapeTable& table, std::int32_t& count,
+                         std::map<std::string, SourceLocation>& names, int depth);
+        bool lowerRows(SourceLocation location, const RuntimeBuiltin& builtin, const ast::Expr& arg,
+                       std::vector<llvm::Value*>& irArgs);
+        bool lowerDelimiter(const RuntimeBuiltin& builtin, const ast::Expr& arg, std::vector<llvm::Value*>& irArgs);
+        bool lowerColumn(const ast::Expr& arg, std::vector<llvm::Value*>& irArgs);
+
         // ---- Math.cpp -----------------------------------------------------------------------------------------------
         llvm::Value* lowerMath(const Builtin& builtin, ast::Type type, llvm::Value* x);
         static std::string mathName(const Builtin& builtin, MathFunction which);
@@ -1159,5 +1182,7 @@ namespace fminus::ir::detail
         std::vector<RouteLiteral> routeLiterals_;     // every route literal, in the order lowered (WebServer.cpp)
         // Each module type's table for json_read, made at its first call (Shapes.cpp, moduleShape).
         std::unordered_map<const ast::Module*, llvm::GlobalVariable*> moduleShapes_;
+        // Each module type's table for csv_read, made at its first call (Csv.cpp, csvShape): null for one refused.
+        std::unordered_map<const ast::Module*, llvm::GlobalVariable*> csvShapes_;
     };
 } // namespace fminus::ir::detail

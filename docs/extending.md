@@ -40,7 +40,8 @@ deadline for the requests a block starts, every one of them ended where the bloc
 module filled from a JSON document in one walk, by a table of the module's fields the compiler makes; and recipe 51 the
 report's last piece, a JSON literal of arrays, vectors, enumerations by name and modules, from the same table, written
 as a reply's, a POST's and a file's bytes. Recipe 52 is the first step of the plan for offline data, a program that is
-a tool: `int main`, its exit status, its arguments' text, and C's `printf`. Then the pitfalls
+a tool: `int main`, its exit status, its arguments' text, and C's `printf`; recipe 53 its second, tables in: CSV read
+where it lies, rows into an array of a module by a table of its columns, and NumPy's `.npy`. Then the pitfalls
 those recipes ran into, and design notes for what comes next. [simd.md](simd.md) has recipes 7 to 9, for vectors.
 
 Recipes 1 to 4 are in the compiler now (`tanhf` and `%`; `bool` and its operators; `if`, `while` and `for`), and so are
@@ -55,7 +56,7 @@ recipe 32 (one error a mistake, enumerated types, `-Wswitch`), recipe 33 (`doubl
 builtins' arguments, bytes to numbers, and the build options of builtins), recipe 39 (the JSON parser, and paths
 the compiler prepares), recipe 40 (the XML parser), recipe 41 (the web library), recipe 42 (its server), recipe 43
 (the file interface), recipe 44 (typed handles, `defer`, and `if` and `switch` with a declaration), recipe 45
-(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 48 (holes, and text from requests, documents and listings), recipe 49 (`within`), recipe 50 (`json_read`), recipe 51 (a JSON literal of modules, and its sinks) and recipe 52 (`int main`, its arguments' text, and `printf`), so their sections describe how the code you have got there: read a section beside the files it
+(`serve`, `route`, `reply` and the JSON literal), recipe 46 (`string` and `char`), recipe 47 (`when`), recipe 48 (holes, and text from requests, documents and listings), recipe 49 (`within`), recipe 50 (`json_read`), recipe 51 (a JSON literal of modules, and its sinks), recipe 52 (`int main`, its arguments' text, and `printf`) and recipe 53 (tables: CSV and `.npy`), so their sections describe how the code you have got there: read a section beside the files it
 names. Recipes 5 and 6, a runtime function and a pass, are not part of the language; they live in [recipes/](recipes/)
 as a patch, so you can apply them to see them work. None of these are sketches: each was applied to this repository, built with `-Werror`, and
 tested in the dev and asan presets, every test passing (recipes 38 to 51 in the release preset only: each says where).
@@ -10210,6 +10211,113 @@ a reply: `%.g` (a precision of no digits) was its own three bytes, and is now C'
   IR. `printf-errors.fm`: every error at its column, the effects', and the refused `main`.
 - Changed: `run.fm`, `handles.fm` and `simd.fm` (`--run`'s message names strings now), `string-type.fm` (`--run`
   passes a string where it refused one), and `WebServerTest.cpp` (a reply's `%.g`, above).
+
+## Recipe 53: tables, CSV read into an array of a module, and NumPy's `.npy`
+
+*In the compiler. Code: the reader, `src/runtime/Csv.cpp` (the document and its row index, a row's cells, the column
+reads, the categories, `fminus_rt_csv_read`), and `Npy.cpp`; `FieldCategory` and `shapeEnd`'s `categories`
+(`src/runtime/JsonShapes.h`); `Handle::CsvDoc` and its name (`src/frontend/Ast.h`, `Ast.cpp`, `Lexer.l`, and
+`isFMinusKeyword` in `src/circuit/Emit.cpp`); `Param::CsvDoc`, `Column`, `Doubles`, `Ints`, `Delimiter` and `Rows`,
+`Result::CsvDoc`, the builtins' entries, the left-out delimiter, and `RuntimeKind::CsvParse`, `CsvRead`, `CsvFill` and
+`NpyRead` (`src/ir/Lowering.h`, `Calls.cpp`); `src/ir/Csv.cpp` (`csvStatus`, `checkCsvAttribute`, `csvShape` and its
+helpers, `lowerRows`, `lowerDelimiter`, `lowerColumn`), with `named` (`Functions.cpp`) and `checkAttributes`
+(`Modules.cpp`) calling into it; `src/api/CsvSchema.cpp` and `--emit fm` of a `.csv` or a `.tsv`
+(`tools/fminus/main.cpp`). Tests: `tests/unit/CsvTest.cpp`, `CsvReadTest.cpp` and `NpyTest.cpp` (`[csv]`, `[npy]`),
+and `tests/lit/fminus/csv.fm` and `csv-schema.fm`. Built with `-Werror` and tested on Linux x86-64 in the `dev` preset
+(667 tests), the `web` preset (807) and a `dev` tree without JSON, XML or the file interface (553), every test passing
+but those that skip themselves on the machine it was written on (a pool that wants more cores, a locale with a
+decimal comma); not in `asan`, `tsan` or `release`, nor on macOS or Windows. [tables.md](tables.md) is the manual;
+[research/data/README.md](research/data/README.md), §5, the plan.*
+
+Step 2 of the plan for offline data: a table in. A CSV file's rows go into an array of a module, a row each, by a table
+of the module's fields the compiler makes, as `json_read`'s does; a column goes into an array of numbers; text goes into
+an enumeration, a `char` array or category codes.
+
+```c
+module Trip
+{
+    float fare [[csv::name("Fare Amount")]];
+    int passengers [[fminus::default(1)]];
+    int city [[csv::category]];
+};
+...
+csv_doc doc = csv_parse(file_data(f), file_size(f));
+defer csv_free(doc);
+Trip* trips = malloc(csv_rows(doc) * sizeof(Trip));
+const int complete = csv_read(doc, trips, csv_rows(doc));
+```
+
+### The reader
+
+**A document is an index, not a copy.** `fminus_rt_csv_parse` checks the whole text once (RFC 4180: quotes, `""`, LF
+and CRLF, a byte order mark, empty lines, short rows; tables.md, "A document") and keeps the text's address, the header's
+names and where each row begins: 4 bytes a row. The text must outlive the document, the rule a string's view has.
+LLVM is told so: `CsvParse` gives the text `readonly` but not `captures(none)`, since the document keeps the address;
+and `CsvRead` and `CsvFill`, every read, read *any* memory (the text is the program's, a file's bytes, which no argument
+of the read points to), write only their arguments' (`argmem`) and the document's (`inaccessiblemem`). A read that
+said `argmemonly` would let LLVM move a load of `file_data`'s bytes past it, or a store to them before it.
+
+**A cell** is found by walking its row from its start (`nextCell`), so a column's read costs the bytes of the rows up to
+it, and `csv_read` splits each row once (`cellsOf`). A number is `Numbers.h`'s, XML Schema's syntax, the cell trimmed of
+spaces and tabs; a quoted cell is its bytes between the quotes, and a text with `""` is unescaped into a buffer
+(`textOf`) only when it is read as text.
+
+### `csv_doc`, and a column by index or name
+
+The handle is made as recipe 44 made the others: a `Handle` enumerator, its name, a scanner rule before identifiers, and
+the word in `isFMinusKeyword`, which `CircuitTest.cpp` checks against the scanner. A column is a new kind of parameter,
+`Param::Column`: an `int` lowers to its index, a null name and 0; a `string` (a literal among them) to -1, its bytes and
+their count; the runtime takes either (`columnOf`). The delimiter, `Param::Delimiter`, is a literal of one byte passed as
+an int, and the first parameter that may be left out: `lowerRuntimeCall` shortens a builtin's parameters by it when the
+call has one argument fewer, and passes a comma.
+
+### `csv_read`: a module's columns
+
+`csvShape` makes the table `fminus_rt_csv_read` walks: `JsonShapes.h`'s module shape, its records one a column, each a
+leaf (`appendShape`'s float, double, int, bool, enumeration or char array) at its offset in the rows' module and
+under its column's name. `csvColumns` walks a module's fields; `csvElements` flattens a field: a nested module's fields
+as `name.field` (its offsets added), an array's elements and a vector's lanes as `name[k]` (or the `csv::name`
+list's), a 2-D array's as `name[i][j]`; `csvLeaf` appends the record, its flags the field's range, default and, for an
+`int` with `[[csv::category]]`, `FieldCategory`, the one flag JSON's tables never carry (`shapeEnd` refuses it unless
+asked). A name two leaves share is an error with a note at the first. The call passes the table, the rows' address
+and the module's size, the rows' stride, which `lowerRows` gets from the data layout.
+
+**The runtime** checks the table as `json_read` does, maps each record to its column by name (a column missing for a
+record without a default is `CSV_MISSING`, nothing written), makes each category column's codes in row order
+(`levelsOf`: the first time a read asks, under the document's lock, kept until `csv_free`), and then converts blocks of
+1024 rows on the pool (`fminus_rt_parallel_start`, `_for`, `_stop`): each row is one block's, each block one thread's,
+and the count of complete rows is a sum of integers, so the rows and the result are the same on any number of threads.
+A cell not read takes its field's default, or NaN for a float or a double, or leaves the field as it was.
+
+### The schema, `--emit fm`
+
+`fminus::csvSchema` (`src/api/CsvSchema.cpp`) reads the file through the runtime's own functions: each column's distinct
+texts as its categories (`fminus_rt_csv_levels`, `_label`), typed by them (tables.md, "The schema, written for you"),
+so the module reads what `csv_read` will. The driver calls it for a `.csv` or a `.tsv` input with `--emit fm`
+(`isTable`), and refuses a table as a program.
+
+### `.npy`
+
+`Npy.cpp` reads numpy's header as text and trusts none of it (the descr, `fortran_order`, the shape's tuple, every count
+against the bytes there), and copies little-endian `<f4`, `<f8` and `<i4` values into floats. `npy_floats` takes the
+parameters `bytes_floats` does, so it is described as `Decode` is; `npy_shape` reads its bytes only (`NpyRead`).
+
+### Tests
+
+- `tests/unit/CsvTest.cpp` (`[csv]`): the reader through its C functions: a header and numbers, a cap, doubles
+  correctly rounded, quotes with the delimiter, line ends and `""` inside, a quoted number, a decimal comma that is no
+  number, a byte order mark, empty lines, short rows, a lone CR at the end, what is no document, another delimiter, a
+  column's categories in row order, a null document.
+- `tests/unit/CsvReadTest.cpp` (`[csv]`): through the JIT, every kind of field and every name (`csv::name` one and a
+  list, a 2-D array's, a nested module's, a vector's lanes), a default, a range, NaN, an enumeration by name and by
+  number, a char array that does not fit, a category, `csv::skip`, a string left alone, short rows, the complete count;
+  `CSV_MISSING` with nothing written, a cap, a null document; 25,000 rows on the pool against each row's expected
+  values; column reads by index and name with a tab; the errors.
+- `tests/unit/NpyTest.cpp` (`[npy]`): files made byte by byte as numpy writes them, versions 1.0 and 2.0, the three
+  types, 0 to 3 dimensions, a cap, and the refused; the builtins through the JIT.
+- `tests/lit/fminus/csv.fm`: the table word by word, the calls (the comma as 44, a column by name as -1), the
+  declarations, and a program run through the JIT and as an executable on a file; `csv-schema.fm`: the module
+  `--emit fm` writes of an awkward header, this program reading the table with it, a `.tsv`, and the driver's errors.
 
 ## Pitfalls
 

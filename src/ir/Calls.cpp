@@ -95,6 +95,49 @@ namespace fminus::ir::detail
         // terms, refused in a nonallocating or nonblocking function.
         RuntimeBuiltin{"printf", "fminus_rt_printf", {Param::PrintFormat}, 1, RuntimeEffect::Allocates},
         RuntimeBuiltin{"eprintf", "fminus_rt_eprintf", {Param::PrintFormat}, 1, RuntimeEffect::Allocates},
+        // The CSV reader (runtime/Csv.cpp, Csv.cpp here), in every build. csv_parse(data, bytes) gives a document, a
+        // csv_doc, of the bytes at data, which it reads where they lie (null for a text that is no CSV), its fields
+        // split by commas, or by the byte its optional third argument names, a literal of one byte ("\t"); csv_free
+        // frees it: both allocate. Wait-free, bounded by the document: csv_rows and csv_columns, csv_name(doc, j) a
+        // column's name (a string until csv_free), csv_find(doc, name) a column's index or -1, and a column's cells,
+        // the column an int or a string (Param::Column): csv_floats(doc, column, out, cap) and csv_doubles (NaN for a
+        // cell that is no number), csv_ints(doc, column, out, cap, fallback). csv_read(doc, rows, cap) fills an array
+        // of a module, a row each, by its type's table (Csv.cpp); csv_levels(doc, column) a column's categories' count,
+        // csv_label(doc, column, code) one's text (a string until csv_free): they allocate.
+        RuntimeBuiltin{"csv_parse", "fminus_rt_csv_parse", {Param::Bytes, Param::Int, Param::Delimiter}, 3,
+                       RuntimeEffect::Allocates, Feature::None, Result::CsvDoc},
+        RuntimeBuiltin{"csv_free", "fminus_rt_csv_free", {Param::CsvDoc}, 1, RuntimeEffect::Allocates, Feature::None,
+                       Result::Void},
+        RuntimeBuiltin{"csv_rows", "fminus_rt_csv_rows", {Param::CsvDoc}, 1, RuntimeEffect::WaitFree, Feature::None,
+                       Result::Int},
+        RuntimeBuiltin{"csv_columns", "fminus_rt_csv_columns", {Param::CsvDoc}, 1, RuntimeEffect::WaitFree,
+                       Feature::None, Result::Int},
+        RuntimeBuiltin{"csv_name", "fminus_rt_csv_name", {Param::CsvDoc, Param::Int}, 2, RuntimeEffect::WaitFree,
+                       Feature::None, Result::String},
+        RuntimeBuiltin{"csv_find", "fminus_rt_csv_find", {Param::CsvDoc, Param::Text}, 2, RuntimeEffect::WaitFree,
+                       Feature::None, Result::Int},
+        RuntimeBuiltin{"csv_floats", "fminus_rt_csv_floats", {Param::CsvDoc, Param::Column, Param::Floats, Param::Int},
+                       4, RuntimeEffect::WaitFree, Feature::None, Result::Int},
+        RuntimeBuiltin{"csv_doubles", "fminus_rt_csv_doubles",
+                       {Param::CsvDoc, Param::Column, Param::Doubles, Param::Int}, 4, RuntimeEffect::WaitFree,
+                       Feature::None, Result::Int},
+        RuntimeBuiltin{"csv_ints", "fminus_rt_csv_ints",
+                       {Param::CsvDoc, Param::Column, Param::Ints, Param::Int, Param::Int}, 5, RuntimeEffect::WaitFree,
+                       Feature::None, Result::Int},
+        RuntimeBuiltin{"csv_read", "fminus_rt_csv_read", {Param::CsvDoc, Param::Rows, Param::Int}, 3,
+                       RuntimeEffect::Allocates, Feature::None, Result::Int},
+        RuntimeBuiltin{"csv_levels", "fminus_rt_csv_levels", {Param::CsvDoc, Param::Column}, 2,
+                       RuntimeEffect::Allocates, Feature::None, Result::Int},
+        RuntimeBuiltin{"csv_label", "fminus_rt_csv_label", {Param::CsvDoc, Param::Column, Param::Int}, 3,
+                       RuntimeEffect::Allocates, Feature::None, Result::String},
+        // NumPy's .npy (runtime/Npy.cpp), in every build: npy_floats(data, bytes, out, cap) an .npy file's values as
+        // floats, how many it holds (or -1 for bytes that are no .npy of float32, float64 or int32 in C order), the
+        // first `cap` written; npy_shape(data, bytes, axis) its dimension `axis`, or with -1 how many it has.
+        // Wait-free.
+        RuntimeBuiltin{"npy_floats", "fminus_rt_npy_floats", {Param::Bytes, Param::Int, Param::Floats, Param::Int}, 4,
+                       RuntimeEffect::WaitFree},
+        RuntimeBuiltin{"npy_shape", "fminus_rt_npy_shape", {Param::Bytes, Param::Int, Param::Int}, 3,
+                       RuntimeEffect::WaitFree},
         // The JSON parser (runtime/Json.cpp), in a build with FMINUS_JSON. json_parse(data, bytes) gives a document, a
         // json_doc (null for a text that is no JSON, too large or nested too deeply), and json_free(doc) frees it: both
         // allocate. The reads take the document, a JSON Pointer with places for ints (a path, Paths.cpp) and its
@@ -352,8 +395,14 @@ namespace fminus::ir::detail
             return ast::Type::handleType(ast::Handle::FileContent);
         case Param::FileListing:
             return ast::Type::handleType(ast::Handle::FileListing);
+        case Param::CsvDoc:
+            return ast::Type::handleType(ast::Handle::CsvDoc);
         case Param::Floats:
             return ast::Type::pointerTo(ast::Kind::Float, false);
+        case Param::Doubles:
+            return ast::Type::pointerTo(ast::Kind::Double, false);
+        case Param::Ints:
+            return ast::Type::pointerTo(ast::Kind::Int, false);
         case Param::Float:
             return ast::Type::Float;
         case Param::Double:
@@ -371,6 +420,9 @@ namespace fminus::ir::detail
         case Param::Path:
         case Param::Choices:
         case Param::Module:   // a pointer to any module: no one type
+        case Param::Rows:     // the same
+        case Param::Column:   // an int or a string
+        case Param::Delimiter:
         case Param::XmlPath:
         case Param::Url:
         case Param::ContentType:
@@ -412,6 +464,12 @@ namespace fminus::ir::detail
         case Param::XmlRead:
         case Param::FileContent:
         case Param::FileListing:
+        case Param::CsvDoc:
+        case Param::Doubles:
+        case Param::Ints:
+        case Param::Column:
+        case Param::Delimiter:
+        case Param::Rows:
         case Param::Float:
         case Param::Double:
         case Param::Bool:
@@ -464,6 +522,8 @@ namespace fminus::ir::detail
             return ast::Type::handleType(ast::Handle::FileContent);
         case Result::FileListing:
             return ast::Type::handleType(ast::Handle::FileListing);
+        case Result::CsvDoc:
+            return ast::Type::handleType(ast::Handle::CsvDoc);
         case Result::Bytes:
             return ast::Type::pointerTo(ast::Kind::Void, true);
         case Result::String:
@@ -569,6 +629,13 @@ namespace fminus::ir::detail
             TextCopy,      // fminus_rt_string_copy: reads a string's bytes, writes them into a char array
             Print,         // fminus_rt_printf, _printf_s, _eprintf, _eprintf_s (runtime/Print.cpp): reads a format, its
                            // values (and strings), writes a C library's stream
+            CsvParse,      // fminus_rt_csv_parse (runtime/Csv.cpp): reads a text and keeps its address, gives a
+                           // document
+            CsvRead,       // fminus_rt_csv_rows, _columns, _name, _find, _floats, _doubles, _ints: read the document
+                           // and its text, write `out` (or a name's length)
+            CsvFill,       // fminus_rt_csv_read, _levels, _label: the same, allocating the document's levels, and
+                           // csv_read's rows on the pool
+            NpyRead,       // fminus_rt_npy_shape (runtime/Npy.cpp): reads its bytes
         };
 
         struct RuntimeFacts
@@ -676,6 +743,20 @@ namespace fminus::ir::detail
             RuntimeFacts{"fminus_rt_printf_s", RuntimeKind::Print},
             RuntimeFacts{"fminus_rt_eprintf", RuntimeKind::Print},
             RuntimeFacts{"fminus_rt_eprintf_s", RuntimeKind::Print},
+            RuntimeFacts{"fminus_rt_csv_parse", RuntimeKind::CsvParse},
+            RuntimeFacts{"fminus_rt_csv_free", RuntimeKind::DocumentRelease},
+            RuntimeFacts{"fminus_rt_csv_rows", RuntimeKind::CsvRead},
+            RuntimeFacts{"fminus_rt_csv_columns", RuntimeKind::CsvRead},
+            RuntimeFacts{"fminus_rt_csv_name", RuntimeKind::CsvRead},
+            RuntimeFacts{"fminus_rt_csv_find", RuntimeKind::CsvRead},
+            RuntimeFacts{"fminus_rt_csv_floats", RuntimeKind::CsvRead},
+            RuntimeFacts{"fminus_rt_csv_doubles", RuntimeKind::CsvRead},
+            RuntimeFacts{"fminus_rt_csv_ints", RuntimeKind::CsvRead},
+            RuntimeFacts{"fminus_rt_csv_read", RuntimeKind::CsvFill},
+            RuntimeFacts{"fminus_rt_csv_levels", RuntimeKind::CsvFill},
+            RuntimeFacts{"fminus_rt_csv_label", RuntimeKind::CsvFill},
+            RuntimeFacts{"fminus_rt_npy_floats", RuntimeKind::Decode},
+            RuntimeFacts{"fminus_rt_npy_shape", RuntimeKind::NpyRead},
         };
 
         // The heap's allocator family, named after its first function as LangRef asks: LLVM pairs an allocation with
@@ -1102,6 +1183,48 @@ namespace fminus::ir::detail
                                                    : llvm::Attribute::ReadOnly);
                     function.addParamAttr(arg, keepsNone);
                 }
+                break;
+            case RuntimeKind::CsvParse:
+                // Reads the text, and keeps its address: the document reads it again on every read, so the text is
+                // captured (no nocapture), and the document, new memory or null, is no allocator LLVM may remove (its
+                // null says the text is no CSV). Beyond the text and the document, the system allocator's state and
+                // errno.
+                function.setMemoryEffects(
+                    llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)
+                    | llvm::MemoryEffects::inaccessibleOrErrnoMemOnly(llvm::ModRefInfo::ModRef, llvm::ModRefInfo::Mod));
+                function.addParamAttr(0, llvm::Attribute::ReadOnly);
+                function.addRetAttr(llvm::Attribute::NoAlias);
+                function.addRetAttr(llvm::Attribute::NoUndef);
+                break;
+            case RuntimeKind::CsvRead:
+            case RuntimeKind::CsvFill:
+                // Read the document (inaccessible memory: it is opaque) and the text it was parsed from, which is the
+                // program's (a file's bytes, a response's body): memory no argument points to, so any memory, read
+                // only. They write their own out-arguments (`out`, csv_read's rows, a name's or a label's length), and
+                // csv_read, csv_levels and csv_label the document's levels, its pool's state, the allocator and errno:
+                // inaccessible memory. None keeps a pointer to an argument; csv_name and csv_label give the address
+                // of bytes the document holds until csv_free (whose memory is any): neither noalias nor nonnull.
+                function.setMemoryEffects(llvm::MemoryEffects::readOnly() | llvm::MemoryEffects::argMemOnly()
+                                          | llvm::MemoryEffects::inaccessibleMemOnly()
+                                          | llvm::MemoryEffects::errnoMemOnly(llvm::ModRefInfo::ModRef));
+                for (unsigned arg = 0; arg < function.arg_size(); ++arg)
+                {
+                    if (function.getArg(arg)->getType()->isPointerTy())
+                        function.addParamAttr(arg, keepsNone);
+                }
+                if (facts->kind == RuntimeKind::CsvRead)
+                {
+                    function.setDoesNotFreeMemory();
+                    function.setNoSync();
+                }
+                break;
+            case RuntimeKind::NpyRead:
+                // Reads the bytes it is given, keeping no pointer to them, and nothing else.
+                function.setMemoryEffects(llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref));
+                function.setDoesNotFreeMemory();
+                function.setNoSync();
+                function.addParamAttr(0, llvm::Attribute::ReadOnly);
+                function.addParamAttr(0, keepsNone);
                 break;
             case RuntimeKind::Print:
                 // Reads the format and the values (and, the _s functions, the strings' arrays, and their bytes through
@@ -1549,7 +1672,13 @@ namespace fminus::ir::detail
         }
         if (builtin.effect != RuntimeEffect::WaitFree)
             calls_[function_->name].push_back({location, std::string(builtin.name)});   // what Effects.cpp checks
-        const std::span<const Param> params(builtin.params.data(), builtin.arity);
+        // A delimiter, csv_parse's last, may be left out: a comma.
+        std::size_t arity = builtin.arity;
+        const bool defaultDelimiter =
+            arity > 0 && builtin.params[arity - 1] == Param::Delimiter && args.size() == arity - 1;
+        if (defaultDelimiter)
+            --arity;
+        const std::span<const Param> params(builtin.params.data(), arity);
         const auto format = std::ranges::find_if(params, [](Param param) {
             return param == Param::Format || param == Param::Path || param == Param::XmlPath || param == Param::Url
                    || param == Param::ReplyFormat || param == Param::PrintFormat || param == Param::FileName
@@ -1623,6 +1752,21 @@ namespace fminus::ir::detail
             if (param == Param::Module)   // json_read's: its type's table, then its address (Shapes.cpp)
             {
                 fine = lowerFilled(location, builtin, arg, irArgs) && fine;
+                continue;
+            }
+            if (param == Param::Rows)   // csv_read's: its module type's table, the rows' address and size (Csv.cpp)
+            {
+                fine = lowerRows(location, builtin, arg, irArgs) && fine;
+                continue;
+            }
+            if (param == Param::Delimiter)   // csv_parse's: a literal of one byte, passed as it, an int
+            {
+                fine = lowerDelimiter(builtin, arg, irArgs) && fine;
+                continue;
+            }
+            if (param == Param::Column)   // an int, the column's index, or a string, its name (Csv.cpp)
+            {
+                fine = lowerColumn(arg, irArgs) && fine;
                 continue;
             }
             if (param == Param::Json)   // a JSON literal: its description and its values' slots (Shapes.cpp)
@@ -1839,6 +1983,8 @@ namespace fminus::ir::detail
             }
             irArgs.push_back(converted);
         }
+        if (defaultDelimiter)
+            irArgs.push_back(builder_.getInt32(','));
         if (!fine)
             return recovery(type);
         if (builtin.symbol.empty())   // made inline: a string's (Text.cpp)

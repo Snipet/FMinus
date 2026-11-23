@@ -177,6 +177,7 @@ IDENTIFIER  [A-Za-z_][A-Za-z0-9_]*
 "file_content"              { return handleType(fminus::ast::Handle::FileContent, yyextra->where); }
 "file_listing"              { return handleType(fminus::ast::Handle::FileListing, yyextra->where); }
 "fft_plan"                  { return handleType(fminus::ast::Handle::FftPlan, yyextra->where); }
+"csv_doc"                   { return handleType(fminus::ast::Handle::CsvDoc, yyextra->where); }
 "char"                      { return Parser::make_CHAR(yyextra->where); }
 "string"                    { return Parser::make_STRING_TYPE(yyextra->where); }
 "true"                      { return Parser::make_TRUE(yyextra->where); }

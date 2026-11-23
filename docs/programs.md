@@ -471,5 +471,6 @@ is for a program that runs on its own.
   `arg_count()` and `arg(i)`, or C's `argv` once FMinus has pointers to pointers.
 - **Text a program builds**: C's `snprintf` into a `char` array, the array the sink, as a reply's buffer is
   ([research/data/](research/data/README.md), §11).
-- **Tables**: the rest of the data plan, CSV in and out ([research/data/](research/data/README.md)).
+- **Tables out**: CSV is read now ([tables.md](tables.md)); writing one, and the rest of the data plan, are
+  [research/data/](research/data/README.md)'s steps 3 to 5.
 - **Debug information**, so lldb shows FMinus source.

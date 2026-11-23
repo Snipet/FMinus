@@ -78,14 +78,14 @@ namespace fminus::ast
     //
     // A handle is one of the runtime's objects, which a builtin gives and others take: `http_response`, a request the
     // program made; `http_request`, one it received; `http_server`; `json_doc` and `xml_doc`, parsed documents;
-    // `file_content`, a file read whole; `file_listing`, a folder's files; and `fft_plan`. Each is C's opaque handle,
-    // `typedef struct fminus_http_response* http_response;`, a pointer to a struct the program never sees: a ptr in
-    // LLVM, as the void* it replaces was. A handle converts to a void* and a void* to any handle, as C's void* does;
-    // two kinds of handle convert to neither. A program declares one, assigns it, compares two of a kind with == and
-    // != (or one with a void*), tests one as a condition (null is false) and keeps one in an array; it has no
-    // arithmetic, no element and no field, and no pointer to one (FMinus has no pointers to pointers). `handle` says
-    // which, for a handle's type, or a pointer's or an array's whose pointee is one (an array of handles' name stands
-    // for a pointer to its first, which only that array gives).
+    // `file_content`, a file read whole; `file_listing`, a folder's files; `fft_plan`; and `csv_doc`, a table. Each is
+    // C's opaque handle, `typedef struct fminus_http_response* http_response;`, a pointer to a struct the program never
+    // sees: a ptr in LLVM, as the void* it replaces was. A handle converts to a void* and a void* to any handle, as
+    // C's void* does; two kinds of handle convert to neither. A program declares one, assigns it, compares two of a
+    // kind with == and != (or one with a void*), tests one as a condition (null is false) and keeps one in an array; it
+    // has no arithmetic, no element and no field, and no pointer to one (FMinus has no pointers to pointers). `handle`
+    // says which, for a handle's type, or a pointer's or an array's whose pointee is one (an array of handles' name
+    // stands for a pointer to its first, which only that array gives).
     //
     // A string is FMinus's, not C's: a read-only view of bytes something else owns, a pointer and a length (in C,
     // `typedef struct { const char* data; int size; } string;`), {ptr, i32} in LLVM, 16 bytes aligned to 8. No NUL
@@ -113,6 +113,7 @@ namespace fminus::ast
         FileContent,    // file_content: file_read's and file_read_nth's
         FileListing,    // file_listing: file_list's
         FftPlan,        // fft_plan: fft_create's and fft_create_complex's
+        CsvDoc,         // csv_doc: csv_parse's
     };
 
     // A handle type's name, as a program writes it ("http_response"), and the struct C's typedef would point to, as

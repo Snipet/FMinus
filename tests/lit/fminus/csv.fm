@@ -1,0 +1,59 @@
+// The CSV reader's builtins (src/ir/Csv.cpp, src/runtime/Csv.cpp): csv_parse's delimiter a comma when it is left
+// out, a column by its name passed as -1 and the name's bytes, csv_read's table of its module's columns (a float, then
+// an int with the category flag, 4) and the module's size; the runtime's functions declared with what they do (the
+// parse keeps the text's address: no captures(none) on it). Then a program that reads a file's table, through the JIT
+// and as an executable: a default for an empty cell, a column's categories, and a file that is not there.
+// REQUIRES: files
+// RUN: fminus %s -O0 | FileCheck %s
+// RUN: rm -rf %t && mkdir -p %t/data %t/tmp
+// RUN: printf 'x,label\n1.5,a\n2,b\n,a\n' > %t/data/t.csv
+// RUN: fminus %s --run main t --files-read data=%t/data | FileCheck %s --check-prefix=TABLE
+// RUN: env TMPDIR=%t/tmp fminus %s --emit exe -o %t/table
+// RUN: env FMINUS_FILES_READ=data=%t/data %t/table t | FileCheck %s --check-prefix=TABLE
+// RUN: env FMINUS_FILES_READ=data=%t/data not %t/table none | FileCheck %s --check-prefix=NONE
+
+module Row
+{
+    float x [[fminus::default(-1)]];
+    int label [[csv::category]];
+};
+
+int main(string name)
+{
+    file_content f = file_read("data/{name}.csv");
+    defer file_close(f);
+    csv_doc doc = csv_parse(file_data(f), file_size(f));
+    defer csv_free(doc);
+    const int n = csv_rows(doc);
+    if (n == 0)
+    {
+        printf("no table: file status %d\n", file_status(f));
+        return 1;
+    }
+    Row rows[8];
+    const int complete = csv_read(doc, rows, 8);
+    float x[8];
+    printf("%d rows, %d complete, %d labels, x has %d\n", n, complete, csv_levels(doc, "label"),
+           csv_floats(doc, "x", x, 8));
+    for (int i = 0; i < n && i < 8; ++i)
+        printf("%g %s\n", rows[i].x, csv_label(doc, "label", rows[i].label));
+    return 0;
+}
+
+// The table: a module (12) of 2 columns. x: 8 words, its name at byte 0 for 1, offset 0, flags 2 (a default), the
+// default -1.0 as two words (its bits' low 32, 0, then 0xbff00000), a float (1). label: 6 words, its name at byte 1
+// for 5, offset 4, flags 4 (a category), an int (3).
+// CHECK: @csv.shape.Row = private unnamed_addr constant { i32, i32, [16 x i32], [6 x i8] } { i32 16, i32 6, [16 x i32] [i32 12, i32 2, i32 8, i32 0, i32 1, i32 0, i32 2, i32 0, i32 -1074790400, i32 1, i32 6, i32 1, i32 5, i32 4, i32 4, i32 3], [6 x i8] c"xlabel" }, align 4
+// CHECK-LABEL: define i32 @main({ ptr, i32 } %name)
+// CHECK:       call ptr @fminus_rt_csv_parse(ptr %{{.*}}, i32 %{{.*}}, i32 44)
+// CHECK:       call i32 @fminus_rt_csv_read(ptr %{{.*}}, ptr @csv.shape.Row, ptr %{{.*}}, i32 8, i32 8)
+// CHECK:       call i32 @fminus_rt_csv_floats(ptr %{{.*}}, i32 -1, ptr @{{.*}}, i32 1, ptr %{{.*}}, i32 8)
+// CHECK:       call void @fminus_rt_csv_free(
+// CHECK-DAG:   declare noalias noundef ptr @fminus_rt_csv_parse(ptr readonly, i32, i32)
+// CHECK-DAG:   declare i32 @fminus_rt_csv_read(ptr captures(none), ptr captures(none), ptr captures(none), i32, i32)
+
+// TABLE:      3 rows, 3 complete, 2 labels, x has 3
+// TABLE-NEXT: 1.5 a
+// TABLE-NEXT: 2 b
+// TABLE-NEXT: -1 a
+// NONE: no table: file status -1

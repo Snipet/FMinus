@@ -103,7 +103,7 @@ float main(float note)
 // EMIT-C: fminus: --emit asm and -c ask for different outputs (assembly, an object file)
 // EMIT-IR: fminus: --emit exe and -emit-llvm ask for different outputs (an executable, LLVM IR)
 // S-EMIT: fminus: --emit obj and -S ask for different outputs (an object file, assembly)
-// FM: fminus: -o {{.*}}never.fm: a .fm file is what --emit fm writes, the FMinus module a circuit netlist (.cir) generates, and {{.*}}command-line.fm is not one
+// FM: fminus: -o {{.*}}never.fm: a .fm file is what --emit fm writes, the FMinus module a circuit netlist (.cir) generates or a table (.csv, .tsv) suggests, and {{.*}}command-line.fm is neither
 // INPUT: input is required
 // SECTIONS: .text
 // VERSION:      fminus version {{[0-9]+\.[0-9]+\.[0-9]+}} (LLVM {{[0-9]+\.[0-9]+\.[0-9]+.*}})

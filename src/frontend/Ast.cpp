@@ -587,6 +587,8 @@ namespace fminus::ast
             return "file_listing";
         case Handle::FftPlan:
             return "fft_plan";
+        case Handle::CsvDoc:
+            return "csv_doc";
         case Handle::None:
             break;
         }

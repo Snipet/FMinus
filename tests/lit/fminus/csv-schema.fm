@@ -1,0 +1,59 @@
+// fminus data.csv --emit fm: the module a table's header and rows suggest (src/api/CsvSchema.cpp), a field a column:
+// ints, floats, a double for more digits than a float keeps, a bool, an enumeration of a few words, a category of the
+// rest, a name that is no field's own (a space, a first digit, a keyword) under csv::name, and a second column of one
+// name skipped. Then this program, which #includes the module written to a file, reads the table with it. A .tsv
+// splits at tabs; a table is no program; --emit fm of anything else is the driver's error.
+// REQUIRES: files
+// RUN: rm -rf %t && mkdir -p %t/data
+// RUN: printf 'Pickup Hour,1st,float,a,a,flag,price,id,city,wave\n7,1.5,2,3,4,TRUE,0.123456789,2147483647,Oslo Sentrum,saw\n8,,5,6,7,false,1e300,-5,Rome,sine\n' > %t/data/odd-trips.csv
+// RUN: fminus %t/data/odd-trips.csv --emit fm | FileCheck %s --check-prefix=SCHEMA --match-full-lines --strict-whitespace
+// RUN: fminus %t/data/odd-trips.csv -o %t/schema.fm
+// RUN: fminus %s -I %t --run main --files-read data=%t/data | FileCheck %s --check-prefix=READ
+// RUN: printf 'a\tb\n1\tx y\n' > %t/data/t.tsv
+// RUN: fminus %t/data/t.tsv --emit fm | FileCheck %s --check-prefix=TSV
+// RUN: not fminus %t/data/t.tsv 2>&1 | FileCheck %s --check-prefix=PROGRAM
+// RUN: printf 'a\n"open\n' > %t/data/bad.csv
+// RUN: not fminus %t/data/bad.csv --emit fm 2>&1 | FileCheck %s --check-prefix=BAD
+// RUN: not fminus %s --emit fm 2>&1 | FileCheck %s --check-prefix=NEITHER
+
+#include "schema.fm"
+
+int main()
+{
+    file_content f = file_read("data/odd-trips.csv");
+    defer file_close(f);
+    csv_doc doc = csv_parse(file_data(f), file_size(f));
+    defer csv_free(doc);
+    OddTripsRow rows[2];
+    const int complete = csv_read(doc, rows, 2);
+    printf("%d of %d complete; hour %d %d; 1st %g; price %g %g; flag %d %d; city %s; wave %d\n", complete,
+           csv_rows(doc), rows[0].Pickup_Hour, rows[1].Pickup_Hour, rows[0]._1st, rows[0].price, rows[1].price,
+           rows[0].flag, rows[1].flag, csv_label(doc, "city", rows[0].city), rows[1].wave);
+    return 0;
+}
+
+// SCHEMA:// odd-trips.csv: 2 rows, 10 columns. Written by fminus --emit fm: check it, and keep it in the program.
+// SCHEMA-NEXT:enum wave_value { saw, sine };
+// SCHEMA-EMPTY:
+// SCHEMA-NEXT:module OddTripsRow
+// SCHEMA-NEXT:{
+// SCHEMA-NEXT:    int Pickup_Hour {{\[\[}}csv::name("Pickup Hour")]]; // 7 to 8
+// SCHEMA-NEXT:    float _1st {{\[\[}}csv::name("1st")]];    // 1.5 to 1.5, 1 empty
+// SCHEMA-NEXT:    int float_ {{\[\[}}csv::name("float")]];  // 2 to 5
+// SCHEMA-NEXT:    int a;                              // 3 to 6
+// SCHEMA-NEXT:    int a_2 {{\[\[}}csv::name("a")]] {{\[\[}}csv::skip]]; // a second column "a", which csv_read cannot tell from the first: read it by its index, 4
+// SCHEMA-NEXT:    bool flag;                          // true or false
+// SCHEMA-NEXT:    double price;                       // 0.123456789 to 1e+300
+// SCHEMA-NEXT:    int id;                             // -5 to 2147483647
+// SCHEMA-NEXT:    int city {{\[\[}}csv::category]];         // 2 distinct texts: a code each, csv_label(doc, "city", code) the text
+// SCHEMA-NEXT:    enum wave_value wave;               // 2 values
+// SCHEMA-NEXT:};
+
+// READ: 1 of 2 complete; hour 7 8; 1st 1.5; price 0.123457 1e+300; flag 1 0; city Oslo Sentrum; wave 1
+
+// TSV: module TRow
+// TSV:     int a;
+// TSV:     int b {{\[\[}}csv::category]];
+// PROGRAM: fminus: {{.*}}t.tsv is a table: --emit fm writes the module its header and rows suggest, for a program that reads it with csv_parse and csv_read
+// BAD: fminus: {{.*}}bad.csv: no CSV table: no header, a quote never closed, a byte after a closing quote, or a row of more fields than the header
+// NEITHER: fminus: --emit fm: {{.*}}csv-schema.fm is neither a circuit netlist (.cir) nor a table (.csv, .tsv)
